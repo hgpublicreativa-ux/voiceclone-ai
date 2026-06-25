@@ -217,6 +217,40 @@ def speak(
 
     return FileResponse(path=str(output_path), media_type="audio/wav", filename="speech.wav")
 
+# ── One-shot clone (no API key needed, for frontend testing) ─────────────────
+@app.post("/clone")
+async def clone_voice(
+    audio: UploadFile = File(...),
+    text: str = Form(...),
+    language: str = Form(default="es"),
+):
+    """Clone voice on the fly without saving. For frontend testing."""
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Texto vacío.")
+
+    tmp_path = VOICES_DIR / f"tmp_{uuid.uuid4()}{Path(audio.filename).suffix}"
+    output_path = OUTPUTS_DIR / f"{uuid.uuid4()}.wav"
+
+    with open(tmp_path, "wb") as f:
+        shutil.copyfileobj(audio.file, f)
+
+    try:
+        tts = get_tts()
+        tts.tts_to_file(
+            text=text,
+            speaker_wav=str(tmp_path),
+            language=language,
+            file_path=str(output_path),
+        )
+    except Exception as e:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Error TTS: {str(e)}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    return FileResponse(path=str(output_path), media_type="audio/wav", filename="cloned_voice.wav")
+
+
 # ── Legacy: save/status/delete default voice (frontend compatibility) ─────────
 @app.post("/voice/save")
 async def save_default_voice(
