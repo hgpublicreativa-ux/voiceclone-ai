@@ -752,9 +752,10 @@
 
     <div class="api-box visible" id="apiBox">
       <div class="api-box-label">Endpoint para tu app</div>
-      <div class="api-snippet"><span class="cm"># Tu app llama esto con solo el texto:</span>
-<span class="kw">POST</span> http://localhost:8000/speak
+      <div class="api-snippet" id="apiSnippet"><span class="cm"># Tu app llama esto con solo el texto:</span>
+<span class="kw">POST</span> <span id="snippetUrl">...</span>/speak
 Content-Type: application/json
+X-API-Key: vc-cBRLLcudmHklbN-tytowFK3ylrtCpAqNfhkCgG2Dyfo
 
 {
   <span class="st">"text"</span>: <span class="st">"Hola, soy tu asistente."</span>,
@@ -825,6 +826,10 @@ Content-Type: application/json
   const API_BASE = (window.location.protocol === 'file:' || window.location.hostname === 'localhost')
     ? 'http://localhost:8000'
     : window.location.origin;
+  document.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('snippetUrl');
+    if (el) el.textContent = API_BASE;
+  });
 </script>
 <script>
   const API = API_BASE;
