@@ -3,6 +3,14 @@ import uuid
 import shutil
 from pathlib import Path
 
+# Patch torch.load before any TTS import — PyTorch 2.6 changed weights_only default to True
+import torch
+_orig_torch_load = torch.load
+def _patched_torch_load(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _orig_torch_load(*args, **kwargs)
+torch.load = _patched_torch_load
+
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,14 +43,6 @@ _tts_instance = None
 def get_tts():
     global _tts_instance
     if _tts_instance is None:
-        import torch
-        # PyTorch 2.6+ changed weights_only default to True, breaking XTTS checkpoints
-        _orig_load = torch.load
-        def _patched_load(*args, **kwargs):
-            kwargs.setdefault("weights_only", False)
-            return _orig_load(*args, **kwargs)
-        torch.load = _patched_load
-
         from TTS.api import TTS
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _tts_instance = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
@@ -68,21 +68,9 @@ async def save_voice(
     with open(tmp_path, "wb") as f:
         shutil.copyfileobj(audio.file, f)
 
-    try:
-        # Convert to WAV via XTTS preprocessing (validates audio)
-        tts = get_tts()
-        # Just verify it loads without error by doing a short synthesis
-        test_out = OUTPUT_DIR / f"test_{uuid.uuid4()}.wav"
-        tts.tts_to_file(
-            text="Prueba de voz.",
-            speaker_wav=str(tmp_path),
-            language="es",
-            file_path=str(test_out),
-        )
-        test_out.unlink(missing_ok=True)
-    except Exception as e:
+    if tmp_path.stat().st_size < 1000:
         tmp_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=f"Audio inválido: {str(e)}")
+        raise HTTPException(status_code=400, detail="Archivo de audio demasiado pequeño o vacío.")
 
     shutil.move(str(tmp_path), str(DEFAULT_VOICE_PATH))
     DEFAULT_VOICE_META.write_text(name, encoding="utf-8")
