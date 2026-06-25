@@ -306,14 +306,14 @@ async def clone_voice(
     return FileResponse(path=str(output_path), media_type="audio/wav", filename="cloned_voice.wav")
 
 
-# ── Legacy: save/status/delete default voice (frontend compatibility) ─────────
+# ── Public voice library (used by the web UI) ─────────────────────────────────
 @app.post("/voice/save")
-async def save_default_voice(
+async def save_voice_library(
     audio: UploadFile = File(...),
     name: str = Form(default="Mi Voz"),
 ):
-    """Legacy endpoint — saves voice without admin key (for the frontend UI)."""
-    voice_id = "default"
+    """Save a voice to the library with a unique id. Each voice persists in the volume."""
+    voice_id = str(uuid.uuid4())[:8]
     voice_dir = VOICES_DIR / voice_id
     voice_dir.mkdir(exist_ok=True)
     audio_path = voice_dir / f"reference{Path(audio.filename).suffix}"
@@ -322,6 +322,7 @@ async def save_default_voice(
         shutil.copyfileobj(audio.file, f)
 
     if audio_path.stat().st_size < 1000:
+        shutil.rmtree(voice_dir, ignore_errors=True)
         raise HTTPException(status_code=400, detail="Archivo demasiado pequeño.")
 
     # Clean the reference for more natural cloning
@@ -337,23 +338,50 @@ async def save_default_voice(
     save_voices_meta(meta)
     return {"status": "saved", "name": name, "voice_id": voice_id}
 
-@app.get("/voice/status")
-def voice_status():
-    meta = load_voices_meta()
-    if "default" in meta:
-        return {"has_voice": True, "name": meta["default"]["name"]}
-    if meta:
-        first = next(iter(meta.values()))
-        return {"has_voice": True, "name": first["name"]}
-    return {"has_voice": False, "name": None}
 
-@app.delete("/voice")
-def delete_default_voice():
+@app.get("/voice/list")
+def voice_library_list():
+    """List all saved voices (public — for the web UI)."""
     meta = load_voices_meta()
-    if "default" in meta:
-        voice_dir = VOICES_DIR / "default"
-        if voice_dir.exists():
-            shutil.rmtree(voice_dir)
-        del meta["default"]
-        save_voices_meta(meta)
-    return {"status": "deleted"}
+    return [
+        {"voice_id": vid, "name": v["name"], "created_at": v["created_at"]}
+        for vid, v in sorted(meta.items(), key=lambda kv: kv[1].get("created_at", ""), reverse=True)
+    ]
+
+
+@app.delete("/voice/item/{voice_id}")
+def voice_library_delete(voice_id: str):
+    """Delete a voice from the library (public — for the web UI)."""
+    meta = load_voices_meta()
+    if voice_id not in meta:
+        raise HTTPException(status_code=404, detail="Voz no encontrada.")
+    voice_dir = VOICES_DIR / voice_id
+    if voice_dir.exists():
+        shutil.rmtree(voice_dir, ignore_errors=True)
+    del meta[voice_id]
+    save_voices_meta(meta)
+    return {"status": "deleted", "voice_id": voice_id}
+
+
+@app.post("/voice/generate")
+def voice_library_generate(req: SpeakRequest):
+    """Generate speech from a saved voice by id (public — for the web UI test)."""
+    if not req.text.strip():
+        raise HTTPException(status_code=400, detail="Texto vacío.")
+    meta = load_voices_meta()
+    if not meta:
+        raise HTTPException(status_code=404, detail="No hay voces guardadas.")
+    voice_id = req.voice_id or next(iter(meta))
+    if voice_id not in meta:
+        raise HTTPException(status_code=404, detail=f"Voz '{voice_id}' no encontrada.")
+    speaker_wav = meta[voice_id]["audio_file"]
+    if not Path(speaker_wav).exists():
+        raise HTTPException(status_code=404, detail="Archivo de voz no encontrado.")
+
+    output_path = OUTPUTS_DIR / f"{uuid.uuid4()}.wav"
+    try:
+        synthesize(req.text, speaker_wav, req.language, str(output_path))
+    except Exception as e:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Error TTS: {str(e)}")
+    return FileResponse(path=str(output_path), media_type="audio/wav", filename="speech.wav")

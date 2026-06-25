@@ -499,6 +499,46 @@
   .api-snippet .kw { color: var(--accent3); }
   .api-snippet .st { color: #ffb86c; }
 
+  /* — Voice library items — */
+  .voice-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 16px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .voice-item:hover { border-color: var(--border-glow); }
+  .voice-item.selected {
+    border-color: var(--accent3);
+    background: rgba(0,255,163,0.05);
+    box-shadow: 0 0 16px rgba(0,255,163,0.08);
+  }
+  .voice-radio {
+    font-size: 18px;
+    color: var(--accent3);
+    flex-shrink: 0;
+    width: 20px;
+    text-align: center;
+  }
+  .voice-info { flex: 1; min-width: 0; }
+  .voice-name { font-size: 15px; color: var(--text); font-weight: 500; }
+  .voice-meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-family: monospace; }
+  .voice-del {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+    opacity: 0.5;
+    transition: opacity 0.2s;
+    flex-shrink: 0;
+  }
+  .voice-del:hover { opacity: 1; }
+
   /* — Clone button — */
   .clone-btn {
     width: 100%;
@@ -732,45 +772,32 @@
     </div>
   </div>
 
-  <!-- Voice status banner -->
-  <div class="voice-banner" id="voiceBanner">
-    <span>🎙</span>
-    <span class="voice-banner-name" id="voiceBannerName"></span>
-    <button class="delete-voice-btn" onclick="deleteDefaultVoice()" title="Eliminar voz predeterminada">✕</button>
-  </div>
-
-  <!-- Save voice as default -->
+  <!-- Save voice to library -->
   <div class="card" style="border-color: rgba(0,255,163,0.15);">
-    <div class="card-label" style="color: var(--accent3);">02 — Guardar como voz predeterminada</div>
+    <div class="card-label" style="color: var(--accent3);">02 — Guardar voz en biblioteca</div>
     <p style="font-size:13px; color: var(--text-muted); line-height:1.6;">
-      Guarda la voz de referencia para que tu otra aplicación pueda llamar a <code style="color:var(--accent); background:rgba(0,200,255,0.08); padding:2px 6px; border-radius:4px;">/speak</code> sin necesidad de subir audio cada vez.
+      Ponle nombre y guárdala. Las voces persisten — no necesitas volver a subirlas.
     </p>
     <div class="voice-name-row">
-      <input class="voice-name-input" id="voiceNameInput" type="text" placeholder="Nombre de la voz (ej: Mi Voz Principal)" value="Mi Voz">
+      <input class="voice-name-input" id="voiceNameInput" type="text" placeholder="Nombre de la voz (ej: Locutor Principal)" value="Mi Voz">
       <button class="save-voice-btn" id="saveVoiceBtn" onclick="saveDefaultVoice()" style="width:auto; padding:10px 20px;">
-        💾 Guardar
+        💾 Guardar en biblioteca
       </button>
-    </div>
-
-    <div class="api-box visible" id="apiBox">
-      <div class="api-box-label">Endpoint para tu app</div>
-      <div class="api-snippet" id="apiSnippet"><span class="cm"># Tu app llama esto con solo el texto:</span>
-<span class="kw">POST</span> <span id="snippetUrl">...</span>/speak
-Content-Type: application/json
-X-API-Key: vc-cBRLLcudmHklbN-tytowFK3ylrtCpAqNfhkCgG2Dyfo
-
-{
-  <span class="st">"text"</span>: <span class="st">"Hola, soy tu asistente."</span>,
-  <span class="st">"language"</span>: <span class="st">"es"</span>
-}
-
-<span class="cm">→ Responde con audio WAV en la voz guardada</span></div>
     </div>
   </div>
 
-  <!-- Step 2: Texto + idioma -->
+  <!-- Voice library -->
   <div class="card">
-    <div class="card-label">02 — Texto e idioma</div>
+    <div class="card-label">03 — Mis voces guardadas</div>
+    <div id="voiceListEmpty" style="font-size:13px; color:var(--text-muted); padding:8px 0;">
+      Aún no tienes voces guardadas. Sube o graba una arriba y guárdala.
+    </div>
+    <div id="voiceList"></div>
+  </div>
+
+  <!-- Text + idioma -->
+  <div class="card">
+    <div class="card-label">04 — Texto e idioma</div>
 
     <select class="lang-select" id="langSelect">
       <option value="es">🇪🇸 Español</option>
@@ -805,7 +832,7 @@ X-API-Key: vc-cBRLLcudmHklbN-tytowFK3ylrtCpAqNfhkCgG2Dyfo
     <button class="clone-btn" id="cloneBtn" onclick="cloneVoice()">
       <span class="clone-btn-inner">
         <span>⚡</span>
-        <span>Clonar Voz</span>
+        <span>Generar con voz seleccionada</span>
       </span>
     </button>
   </div>
@@ -818,6 +845,23 @@ X-API-Key: vc-cBRLLcudmHklbN-tytowFK3ylrtCpAqNfhkCgG2Dyfo
     <a class="download-btn" id="downloadBtn" download="voz_clonada.wav">
       ⬇ Descargar WAV
     </a>
+  </div>
+
+  <!-- API for editor_videos -->
+  <div class="card">
+    <div class="card-label">05 — Endpoint para tu app (editor_videos)</div>
+    <div class="api-snippet" id="apiSnippet" style="background:rgba(0,0,0,0.5); border-radius:8px; padding:14px 16px; font-family:monospace; font-size:12px; color:#a8d8ff; line-height:1.7; overflow-x:auto; white-space:pre;"><span class="cm"># voice_id lo ves en la lista de arriba (opcional — sin él usa la primera voz)</span>
+<span class="kw">POST</span> <span id="snippetUrl">...</span>/speak
+Content-Type: application/json
+X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
+
+{
+  <span class="st">"text"</span>: <span class="st">"Hola, soy tu asistente."</span>,
+  <span class="st">"voice_id"</span>: <span class="st">"abc12345"</span>,
+  <span class="st">"language"</span>: <span class="st">"es"</span>
+}
+
+<span class="cm">→ Responde con audio WAV en esa voz</span></div>
   </div>
 
   <footer>VoiceClone AI · Powered by XTTS v2 · 100% Local</footer>
@@ -836,20 +880,66 @@ X-API-Key: vc-cBRLLcudmHklbN-tytowFK3ylrtCpAqNfhkCgG2Dyfo
 <script>
   const API = API_BASE;
 
-  // — Check default voice on load —
-  async function checkVoiceStatus() {
+  // — Voice library —
+  let savedVoices = [];
+  let selectedVoiceId = null;
+
+  async function loadVoiceLibrary() {
     try {
-      const res = await fetch(`${API}/voice/status`);
-      const data = await res.json();
-      if (data.has_voice) {
-        document.getElementById('voiceBanner').classList.add('visible');
-        document.getElementById('voiceBannerName').textContent = `Voz predeterminada activa: "${data.name}"`;
-      }
+      const res = await fetch(`${API}/voice/list`);
+      savedVoices = await res.json();
+      renderVoiceLibrary();
     } catch (_) {}
   }
-  checkVoiceStatus();
 
-  // — Save default voice —
+  function renderVoiceLibrary() {
+    const list = document.getElementById('voiceList');
+    const empty = document.getElementById('voiceListEmpty');
+    if (!savedVoices.length) {
+      list.innerHTML = '';
+      empty.style.display = 'block';
+      selectedVoiceId = null;
+      return;
+    }
+    empty.style.display = 'none';
+    if (!selectedVoiceId || !savedVoices.find(v => v.voice_id === selectedVoiceId)) {
+      selectedVoiceId = savedVoices[0].voice_id;
+    }
+    list.innerHTML = savedVoices.map(v => {
+      const sel = v.voice_id === selectedVoiceId;
+      const date = new Date(v.created_at).toLocaleDateString('es', { day: '2-digit', month: 'short', year: 'numeric' });
+      return `
+        <div class="voice-item ${sel ? 'selected' : ''}" onclick="selectVoice('${v.voice_id}')">
+          <div class="voice-radio">${sel ? '●' : '○'}</div>
+          <div class="voice-info">
+            <div class="voice-name">${escapeHtml(v.name)}</div>
+            <div class="voice-meta">ID: ${v.voice_id} · ${date}</div>
+          </div>
+          <button class="voice-del" onclick="event.stopPropagation(); deleteVoice('${v.voice_id}','${escapeHtml(v.name)}')" title="Eliminar">🗑</button>
+        </div>`;
+    }).join('');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  }
+
+  function selectVoice(id) {
+    selectedVoiceId = id;
+    renderVoiceLibrary();
+  }
+
+  async function deleteVoice(id, name) {
+    if (!confirm(`¿Eliminar la voz "${name}"? No se puede deshacer.`)) return;
+    try {
+      await fetch(`${API}/voice/item/${id}`, { method: 'DELETE' });
+      await loadVoiceLibrary();
+    } catch (err) {
+      showError('Error al eliminar: ' + err.message);
+    }
+  }
+
+  // — Save voice to library —
   async function saveDefaultVoice() {
     const audioFile = activeTab === 'record' ? recordedBlob : uploadedFile;
     if (!audioFile) return showError('Necesitas grabar o subir un audio de referencia primero.');
@@ -869,24 +959,19 @@ X-API-Key: vc-cBRLLcudmHklbN-tytowFK3ylrtCpAqNfhkCgG2Dyfo
         const err = await res.json().catch(() => ({ detail: 'Error desconocido' }));
         throw new Error(err.detail);
       }
-      document.getElementById('voiceBanner').classList.add('visible');
-      document.getElementById('voiceBannerName').textContent = `Voz predeterminada activa: "${name}"`;
+      const data = await res.json();
+      selectedVoiceId = data.voice_id;
+      await loadVoiceLibrary();
       btn.textContent = '✓ Guardada';
-      setTimeout(() => { btn.disabled = false; btn.textContent = '💾 Guardar'; }, 2500);
+      setTimeout(() => { btn.disabled = false; btn.textContent = '💾 Guardar en biblioteca'; }, 2500);
     } catch (err) {
       showError('Error al guardar voz: ' + err.message);
       btn.disabled = false;
-      btn.textContent = '💾 Guardar';
+      btn.textContent = '💾 Guardar en biblioteca';
     }
   }
 
-  // — Delete default voice —
-  async function deleteDefaultVoice() {
-    try {
-      await fetch(`${API}/voice`, { method: 'DELETE' });
-      document.getElementById('voiceBanner').classList.remove('visible');
-    } catch (_) {}
-  }
+  loadVoiceLibrary();
 
   // — State —
   let activeTab = 'record';
@@ -1092,24 +1177,22 @@ X-API-Key: vc-cBRLLcudmHklbN-tytowFK3ylrtCpAqNfhkCgG2Dyfo
 
   // — Clone —
   async function cloneVoice() {
-    const audioFile = activeTab === 'record' ? recordedBlob : uploadedFile;
     const text = document.getElementById('textInput').value.trim();
     const language = document.getElementById('langSelect').value;
 
-    if (!audioFile) return showError('Necesitas grabar o subir un audio de referencia.');
     if (!text) return showError('Escribe el texto que quieres generar.');
+    if (!selectedVoiceId) return showError('Selecciona o guarda una voz en la biblioteca primero.');
 
     document.getElementById('errorMsg').classList.remove('visible');
     document.getElementById('resultCard').classList.remove('visible');
     setLoading(true);
 
-    const formData = new FormData();
-    formData.append('audio', audioFile, activeTab === 'record' ? 'recording.webm' : uploadedFile.name);
-    formData.append('text', text);
-    formData.append('language', language);
-
     try {
-      const res = await fetch(`${API}/clone`, { method: 'POST', body: formData });
+      const res = await fetch(`${API}/voice/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, voice_id: selectedVoiceId, language }),
+      });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Error desconocido' }));
         throw new Error(err.detail || `HTTP ${res.status}`);
@@ -1122,7 +1205,7 @@ X-API-Key: vc-cBRLLcudmHklbN-tytowFK3ylrtCpAqNfhkCgG2Dyfo
       document.getElementById('resultCard').classList.add('visible');
       document.getElementById('resultCard').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } catch (err) {
-      showError('Error al clonar: ' + err.message);
+      showError('Error al generar: ' + err.message);
     } finally {
       setLoading(false);
     }
