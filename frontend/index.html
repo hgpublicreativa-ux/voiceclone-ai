@@ -820,7 +820,12 @@ Content-Type: application/json
   <footer>VoiceClone AI · Powered by XTTS v2 · 100% Local</footer>
 </div>
 
-<script src="config.js"></script>
+<script>
+  // Auto-detect API URL: same origin on web, localhost when running locally
+  const API_BASE = (window.location.protocol === 'file:' || window.location.hostname === 'localhost')
+    ? 'http://localhost:8000'
+    : window.location.origin;
+</script>
 <script>
   const API = API_BASE;
 
