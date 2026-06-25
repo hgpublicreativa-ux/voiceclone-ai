@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 ENV TTS_HOME=/app/tts_models
@@ -18,10 +18,11 @@ import os; os.makedirs('/app/tts_models', exist_ok=True); \
 from TTS.api import TTS; \
 TTS('tts_models/multilingual/multi-dataset/xtts_v2')"
 
-COPY . .
+COPY backend/ .
+COPY embed/ ./static/embed/
 
 RUN mkdir -p voices outputs
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}

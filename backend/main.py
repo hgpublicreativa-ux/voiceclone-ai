@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 app = FastAPI(title="VoiceClone AI API")
@@ -19,8 +20,12 @@ app.add_middleware(
 
 OUTPUT_DIR = Path("outputs")
 VOICE_DIR = Path("voices")
+STATIC_DIR = Path("static")
 OUTPUT_DIR.mkdir(exist_ok=True)
 VOICE_DIR.mkdir(exist_ok=True)
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 DEFAULT_VOICE_PATH = VOICE_DIR / "default_voice.wav"
 DEFAULT_VOICE_META = VOICE_DIR / "default_voice.txt"
