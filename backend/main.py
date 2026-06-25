@@ -95,6 +95,12 @@ def root():
         return FileResponse(str(index))
     return {"status": "VoiceClone AI API", "docs": "/docs"}
 
+@app.get("/config.js", response_class=None)
+def config_js(request_origin: str = ""):
+    from fastapi.responses import Response
+    js = "const API_BASE = window.location.origin;"
+    return Response(content=js, media_type="application/javascript")
+
 # ── API Key management ────────────────────────────────────────────────────────
 @app.post("/api-keys")
 def create_api_key(
