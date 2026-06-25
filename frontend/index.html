@@ -715,11 +715,12 @@
 
     <!-- Upload panel -->
     <div id="panelUpload">
-      <div class="upload-area visible" id="uploadArea">
-        <input type="file" id="uploadInput" accept="audio/*" onchange="handleUpload(event)">
+      <div class="upload-area visible" id="uploadArea" onclick="document.getElementById('uploadInput').click()">
+        <input type="file" id="uploadInput" accept="audio/*" onchange="handleUpload(event)" style="display:none;">
         <div class="upload-icon">🔊</div>
         <p class="upload-text"><strong>Haz clic</strong> o arrastra un archivo de audio</p>
         <p class="upload-text" style="margin-top:6px;font-size:12px;">WAV · MP3 · OGG · M4A (3–30 seg)</p>
+        <button onclick="event.stopPropagation(); document.getElementById('uploadInput').click();" style="margin-top:14px; padding:8px 20px; background:rgba(0,200,255,0.15); border:1px solid var(--border-glow); border-radius:10px; color:var(--accent); cursor:pointer; font-family:'Syne',sans-serif; font-size:13px;">Seleccionar archivo</button>
       </div>
       <div class="file-selected" id="fileSelected">
         <span style="font-size:20px;">🔊</span>
