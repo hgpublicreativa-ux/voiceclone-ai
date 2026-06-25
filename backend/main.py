@@ -35,8 +35,15 @@ _tts_instance = None
 def get_tts():
     global _tts_instance
     if _tts_instance is None:
-        from TTS.api import TTS
         import torch
+        # PyTorch 2.6+ changed weights_only default to True, breaking XTTS checkpoints
+        _orig_load = torch.load
+        def _patched_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return _orig_load(*args, **kwargs)
+        torch.load = _patched_load
+
+        from TTS.api import TTS
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _tts_instance = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
     return _tts_instance
