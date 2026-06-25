@@ -44,8 +44,7 @@ def get_tts():
     global _tts_instance
     if _tts_instance is None:
         from TTS.api import TTS
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        _tts_instance = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+        _tts_instance = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cpu")
     return _tts_instance
 
 
