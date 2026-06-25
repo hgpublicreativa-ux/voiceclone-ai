@@ -3,6 +3,7 @@ import uuid
 import shutil
 import json
 import secrets
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -54,6 +55,55 @@ def get_tts():
         from TTS.api import TTS
         _tts_instance = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cpu")
     return _tts_instance
+
+
+def preprocess_reference(src_path: str, dst_path: str) -> bool:
+    """
+    Clean the reference audio so XTTS produces natural output:
+    - convert to 22050 Hz mono WAV (XTTS native rate)
+    - loudness-normalize (consistent level)
+    - high-pass 70 Hz to cut rumble, light noise gate
+    Returns True if ffmpeg succeeded, else False (caller falls back to raw file).
+    """
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", src_path,
+                "-af", "highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=22050",
+                "-ac", "1", "-ar", "22050",
+                dst_path,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        return Path(dst_path).exists() and Path(dst_path).stat().st_size > 1000
+    except Exception:
+        return False
+
+
+def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
+    """
+    Run XTTS synthesis with parameters tuned for natural, non-robotic output.
+    - temperature 0.75: more expressive prosody variation
+    - repetition_penalty 5.0: avoids monotone/robotic repetition
+    - top_k/top_p: balanced sampling for natural intonation
+    - enable_text_splitting: better sentence-level prosody on long text
+    """
+    tts = get_tts()
+    tts.tts_to_file(
+        text=text,
+        speaker_wav=speaker_wav,
+        language=language,
+        file_path=output_path,
+        temperature=0.75,
+        length_penalty=1.0,
+        repetition_penalty=5.0,
+        top_k=50,
+        top_p=0.85,
+        speed=1.0,
+        enable_text_splitting=True,
+    )
 
 # ── Storage helpers ───────────────────────────────────────────────────────────
 def load_keys() -> dict:
@@ -154,10 +204,14 @@ async def upload_voice(
         shutil.rmtree(voice_dir)
         raise HTTPException(status_code=400, detail="Archivo de audio demasiado pequeño.")
 
+    # Clean the reference for more natural cloning
+    clean_path = voice_dir / "reference_clean.wav"
+    final_path = str(clean_path) if preprocess_reference(str(audio_path), str(clean_path)) else str(audio_path)
+
     meta = load_voices_meta()
     meta[voice_id] = {
         "name": name,
-        "audio_file": str(audio_path),
+        "audio_file": final_path,
         "created_at": datetime.utcnow().isoformat(),
     }
     save_voices_meta(meta)
@@ -217,13 +271,7 @@ def speak(
 
     output_path = OUTPUTS_DIR / f"{uuid.uuid4()}.wav"
     try:
-        tts = get_tts()
-        tts.tts_to_file(
-            text=req.text,
-            speaker_wav=speaker_wav,
-            language=req.language,
-            file_path=str(output_path),
-        )
+        synthesize(req.text, speaker_wav, req.language, str(output_path))
     except Exception as e:
         output_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Error TTS: {str(e)}")
@@ -248,13 +296,7 @@ async def clone_voice(
         shutil.copyfileobj(audio.file, f)
 
     try:
-        tts = get_tts()
-        tts.tts_to_file(
-            text=text,
-            speaker_wav=str(tmp_path),
-            language=language,
-            file_path=str(output_path),
-        )
+        synthesize(text, str(tmp_path), language, str(output_path))
     except Exception as e:
         output_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Error TTS: {str(e)}")
@@ -282,10 +324,14 @@ async def save_default_voice(
     if audio_path.stat().st_size < 1000:
         raise HTTPException(status_code=400, detail="Archivo demasiado pequeño.")
 
+    # Clean the reference for more natural cloning
+    clean_path = voice_dir / "reference_clean.wav"
+    final_path = str(clean_path) if preprocess_reference(str(audio_path), str(clean_path)) else str(audio_path)
+
     meta = load_voices_meta()
     meta[voice_id] = {
         "name": name,
-        "audio_file": str(audio_path),
+        "audio_file": final_path,
         "created_at": datetime.utcnow().isoformat(),
     }
     save_voices_meta(meta)
