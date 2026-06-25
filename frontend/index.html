@@ -812,11 +812,10 @@
     <textarea
       class="text-input"
       id="textInput"
-      placeholder="Escribe aquí el texto que quieres generar con la voz clonada..."
-      maxlength="1000"
+      placeholder="Escribe aquí el texto que quieres generar con la voz clonada... (sin límite de longitud)"
       oninput="updateCharCount()"
     ></textarea>
-    <div class="char-count"><span id="charCount">0</span> / 1000</div>
+    <div class="char-count"><span id="charCount">0</span> caracteres</div>
   </div>
 
   <!-- Step 3: Clonar -->
@@ -1158,7 +1157,7 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
   // — Char count —
   function updateCharCount() {
     const len = document.getElementById('textInput').value.length;
-    document.getElementById('charCount').textContent = len;
+    document.getElementById('charCount').textContent = len.toLocaleString('es');
   }
 
   // — Helpers —
