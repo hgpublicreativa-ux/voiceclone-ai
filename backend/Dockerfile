@@ -17,6 +17,7 @@ ENV COQUI_TOS_AGREED=1
 
 COPY backend/ .
 COPY embed/ ./static/embed/
+COPY frontend/ ./static/app/
 
 RUN mkdir -p voices outputs
 

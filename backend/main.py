@@ -88,6 +88,13 @@ def require_api_key(x_api_key: str = Header(...)):
 def health():
     return {"status": "ok"}
 
+@app.get("/")
+def root():
+    index = Path("static/app/index.html")
+    if index.exists():
+        return FileResponse(str(index))
+    return {"status": "VoiceClone AI API", "docs": "/docs"}
+
 # ── API Key management ────────────────────────────────────────────────────────
 @app.post("/api-keys")
 def create_api_key(
