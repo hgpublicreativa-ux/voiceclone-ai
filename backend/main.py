@@ -137,45 +137,116 @@ def merge_reference_audios(audio_paths: list, dst_path: str) -> bool:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+import re
+
 def normalize_text(text: str) -> str:
-    """
-    Normalize text so XTTS produces more natural prosody:
-    - ensure sentences end with punctuation (adds rhythm/intonation cues)
-    - collapse excessive whitespace
-    """
-    import re
     text = re.sub(r'\s+', ' ', text).strip()
-    # Add period if the text ends without any punctuation
     if text and text[-1] not in '.!?,;:…':
         text += '.'
     return text
 
 
-def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
+def split_sentences(text: str, max_chars: int = 180) -> list:
     """
-    XTTS v2 parameters tuned for natural, human-sounding output.
+    Split text into sentence-level chunks for XTTS.
+    We do our own splitting and disable XTTS internal splitting to avoid
+    artifacts and hallucinated sounds at chunk boundaries.
+    - Split on sentence-ending punctuation
+    - If a sentence is still too long, split on commas
+    - Max 180 chars per chunk (XTTS is most stable under ~200)
+    """
+    # Split on sentence boundaries keeping the delimiter
+    raw = re.split(r'(?<=[.!?…])\s+', text.strip())
+    chunks = []
+    for sentence in raw:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if len(sentence) <= max_chars:
+            chunks.append(sentence)
+        else:
+            # Too long — split on commas
+            parts = re.split(r',\s*', sentence)
+            current = ""
+            for part in parts:
+                candidate = (current + ", " + part).strip(", ") if current else part
+                if len(candidate) <= max_chars:
+                    current = candidate
+                else:
+                    if current:
+                        chunks.append(current.strip(", "))
+                    current = part
+            if current:
+                chunks.append(current.strip(", "))
+    return [c for c in chunks if c]
 
-    Key choices:
-    - temperature 0.85: higher variation → more natural prosody (0.75 sounds flat)
-    - repetition_penalty 2.5: low enough not to crush natural intonation patterns
-    - top_p 0.92 / top_k 60: wider sampling → less robotic monotone
-    - length_penalty 1.0: neutral (avoid stretching/compressing rhythm)
-    - enable_text_splitting: sentence-level prosody on long texts
-    """
-    tts = get_tts()
+
+def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path: str):
+    """Generate a single short chunk — no internal splitting."""
     tts.tts_to_file(
-        text=normalize_text(text),
+        text=text,
         speaker_wav=speaker_wav,
         language=language,
-        file_path=output_path,
+        file_path=out_path,
         temperature=0.85,
         length_penalty=1.0,
         repetition_penalty=2.5,
         top_k=60,
         top_p=0.92,
         speed=1.0,
-        enable_text_splitting=True,
+        enable_text_splitting=False,  # we handle splitting ourselves
     )
+
+
+def _concat_wavs(part_paths: list, output_path: str):
+    """Concatenate WAV files with a 120ms crossfade to avoid audible cuts."""
+    if len(part_paths) == 1:
+        shutil.copy(part_paths[0], output_path)
+        return
+    FADE = 0.12  # 120ms — smoother than 80ms
+    args = ["-y", "-loglevel", "error"]
+    for p in part_paths:
+        args += ["-i", p]
+    norm = ";".join(
+        f"[{i}:a]aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono[n{i}]"
+        for i in range(len(part_paths))
+    )
+    prev = "[n0]"
+    cross = []
+    for i in range(1, len(part_paths)):
+        out = "[out]" if i == len(part_paths) - 1 else f"[cf{i}]"
+        cross.append(f"{prev}[n{i}]acrossfade=d={FADE}:c1=tri:c2=tri{out}")
+        prev = f"[cf{i}]"
+    filter_str = f"{norm};{';'.join(cross)}"
+    args += ["-filter_complex", filter_str, "-map", "[out]", output_path]
+    subprocess.run(args, check=True, capture_output=True, timeout=120)
+
+
+def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
+    """
+    Split text into sentences, generate each with XTTS, then concat.
+    Doing our own splitting prevents XTTS internal splitting artifacts
+    (cut words, hallucinated sounds at boundaries).
+    """
+    tts = get_tts()
+    text = normalize_text(text)
+    sentences = split_sentences(text)
+
+    if len(sentences) == 1:
+        _synthesize_chunk(tts, sentences[0], speaker_wav, language, output_path)
+        return
+
+    tmp_dir = Path(output_path).parent / f"synth_tmp_{uuid.uuid4().hex[:6]}"
+    tmp_dir.mkdir(exist_ok=True)
+    part_paths = []
+    try:
+        for i, sentence in enumerate(sentences):
+            part = str(tmp_dir / f"part_{i:03d}.wav")
+            _synthesize_chunk(tts, sentence, speaker_wav, language, part)
+            part_paths.append(part)
+        _concat_wavs(part_paths, output_path)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 # ── Storage helpers ───────────────────────────────────────────────────────────
 def load_keys() -> dict:
