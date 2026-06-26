@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 app = FastAPI(title="VoiceClone AI API")
 
@@ -60,16 +60,18 @@ def get_tts():
 def preprocess_reference(src_path: str, dst_path: str) -> bool:
     """
     Clean the reference audio for XTTS v2:
-    - 24000 Hz mono WAV (XTTS v2 native sample rate)
+    - afftdn: FFT-based noise reduction before any filtering
+    - high-pass 80 Hz to cut rumble
     - loudness-normalize to consistent level
-    - high-pass 80 Hz to cut rumble, de-noise lightly
-    - trim leading/trailing silence so the model captures clean speech
+    - trim leading/trailing silence
+    - 24000 Hz mono WAV (XTTS v2 native sample rate)
     """
     try:
         subprocess.run(
             [
                 "ffmpeg", "-y", "-i", src_path,
                 "-af", (
+                    "afftdn=nf=-25,"
                     "highpass=f=80,"
                     "loudnorm=I=-14:TP=-1:LRA=7,"
                     "silenceremove=start_periods=1:start_silence=0.1:start_threshold=-50dB"
@@ -86,6 +88,53 @@ def preprocess_reference(src_path: str, dst_path: str) -> bool:
         return Path(dst_path).exists() and Path(dst_path).stat().st_size > 1000
     except Exception:
         return False
+
+
+def merge_reference_audios(audio_paths: list, dst_path: str) -> bool:
+    """
+    Concatenate multiple reference audio clips into one file for XTTS v2.
+    XTTS v2 uses up to ~30s of reference — more clips = better voice capture.
+    Each clip is preprocessed individually before merging.
+    """
+    if len(audio_paths) == 1:
+        return preprocess_reference(audio_paths[0], dst_path)
+
+    tmp_dir = Path(dst_path).parent / f"merge_tmp_{uuid.uuid4().hex[:6]}"
+    tmp_dir.mkdir(exist_ok=True)
+    clean_paths = []
+    try:
+        for i, src in enumerate(audio_paths):
+            clean = str(tmp_dir / f"ref_{i}.wav")
+            if preprocess_reference(src, clean):
+                clean_paths.append(clean)
+        if not clean_paths:
+            return False
+        if len(clean_paths) == 1:
+            shutil.copy(clean_paths[0], dst_path)
+            return True
+        # Build ffmpeg concat filter
+        inputs = []
+        for p in clean_paths:
+            inputs += ["-i", p]
+        filter_str = "".join(f"[{i}:a]" for i in range(len(clean_paths)))
+        filter_str += f"concat=n={len(clean_paths)}:v=0:a=1[out]"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", *inputs,
+                "-filter_complex", filter_str,
+                "-map", "[out]",
+                "-ar", "24000", "-ac", "1",
+                dst_path,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
+        return Path(dst_path).exists() and Path(dst_path).stat().st_size > 1000
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def normalize_text(text: str) -> str:
@@ -332,34 +381,43 @@ async def clone_voice(
 # ── Public voice library (used by the web UI) ─────────────────────────────────
 @app.post("/voice/save")
 async def save_voice_library(
-    audio: UploadFile = File(...),
+    audio: List[UploadFile] = File(...),
     name: str = Form(default="Mi Voz"),
 ):
-    """Save a voice to the library with a unique id. Each voice persists in the volume."""
+    """
+    Save a voice to the library. Accepts 1–3 audio clips for better cloning.
+    Multiple clips are merged into one reference so XTTS captures more voice variation.
+    """
     voice_id = str(uuid.uuid4())[:8]
     voice_dir = VOICES_DIR / voice_id
     voice_dir.mkdir(exist_ok=True)
-    audio_path = voice_dir / f"reference{Path(audio.filename).suffix}"
 
-    with open(audio_path, "wb") as f:
-        shutil.copyfileobj(audio.file, f)
+    raw_paths = []
+    for i, file in enumerate(audio):
+        raw_path = voice_dir / f"raw_{i}{Path(file.filename).suffix}"
+        with open(raw_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        if raw_path.stat().st_size < 1000:
+            shutil.rmtree(voice_dir, ignore_errors=True)
+            raise HTTPException(status_code=400, detail=f"Archivo {i+1} demasiado pequeño.")
+        raw_paths.append(str(raw_path))
 
-    if audio_path.stat().st_size < 1000:
-        shutil.rmtree(voice_dir, ignore_errors=True)
-        raise HTTPException(status_code=400, detail="Archivo demasiado pequeño.")
-
-    # Clean the reference for more natural cloning
-    clean_path = voice_dir / "reference_clean.wav"
-    final_path = str(clean_path) if preprocess_reference(str(audio_path), str(clean_path)) else str(audio_path)
+    merged_path = voice_dir / "reference_clean.wav"
+    if merge_reference_audios(raw_paths, str(merged_path)):
+        final_path = str(merged_path)
+    else:
+        # Fallback: use first raw file as-is
+        final_path = raw_paths[0]
 
     meta = load_voices_meta()
     meta[voice_id] = {
         "name": name,
         "audio_file": final_path,
         "created_at": datetime.utcnow().isoformat(),
+        "clip_count": len(raw_paths),
     }
     save_voices_meta(meta)
-    return {"status": "saved", "name": name, "voice_id": voice_id}
+    return {"status": "saved", "name": name, "voice_id": voice_id, "clips": len(raw_paths)}
 
 
 @app.get("/voice/list")

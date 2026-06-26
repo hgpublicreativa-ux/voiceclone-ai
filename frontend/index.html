@@ -757,12 +757,12 @@
     <div id="panelUpload">
       <div class="upload-area visible" id="uploadArea">
         <div class="upload-icon">🔊</div>
-        <p class="upload-text"><strong>Selecciona</strong> un archivo de audio</p>
-        <p class="upload-text" style="margin-top:6px;font-size:12px;">WAV · MP3 · OGG · M4A (3–30 seg)</p>
+        <p class="upload-text"><strong>Selecciona 1, 2 o 3 clips</strong> de la misma voz</p>
+        <p class="upload-text" style="margin-top:6px;font-size:12px;">WAV · MP3 · OGG · M4A · Más clips = mejor clonación</p>
         <label for="uploadInput" style="display:inline-block; margin-top:14px; padding:10px 24px; background:rgba(0,200,255,0.15); border:1px solid rgba(0,200,255,0.4); border-radius:10px; color:#00c8ff; cursor:pointer; font-family:'Syne',sans-serif; font-size:13px; font-weight:500;">
-          📁 Elegir archivo
+          📁 Elegir archivos
         </label>
-        <input type="file" id="uploadInput" accept="audio/*" onchange="handleUpload(event)" style="position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;">
+        <input type="file" id="uploadInput" accept="audio/*" multiple onchange="handleUpload(event)" style="position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;">
       </div>
       <div class="file-selected" id="fileSelected">
         <span style="font-size:20px;">🔊</span>
@@ -940,8 +940,9 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
 
   // — Save voice to library —
   async function saveDefaultVoice() {
-    const audioFile = activeTab === 'record' ? recordedBlob : uploadedFile;
-    if (!audioFile) return showError('Necesitas grabar o subir un audio de referencia primero.');
+    const isRecord = activeTab === 'record';
+    if (isRecord && !recordedBlob) return showError('Necesitas grabar un audio de referencia primero.');
+    if (!isRecord && !uploadedFiles.length) return showError('Necesitas subir al menos un audio de referencia.');
 
     const name = document.getElementById('voiceNameInput').value.trim() || 'Mi Voz';
     const btn = document.getElementById('saveVoiceBtn');
@@ -949,7 +950,11 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
     btn.textContent = 'Guardando...';
 
     const formData = new FormData();
-    formData.append('audio', audioFile, activeTab === 'record' ? 'recording.webm' : uploadedFile.name);
+    if (isRecord) {
+      formData.append('audio', recordedBlob, 'recording.webm');
+    } else {
+      uploadedFiles.forEach(f => formData.append('audio', f, f.name));
+    }
     formData.append('name', name);
 
     try {
@@ -961,7 +966,8 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
       const data = await res.json();
       selectedVoiceId = data.voice_id;
       await loadVoiceLibrary();
-      btn.textContent = '✓ Guardada';
+      const clips = data.clips > 1 ? ` (${data.clips} clips)` : '';
+      btn.textContent = `✓ Guardada${clips}`;
       setTimeout(() => { btn.disabled = false; btn.textContent = '💾 Guardar en biblioteca'; }, 2500);
     } catch (err) {
       showError('Error al guardar voz: ' + err.message);
@@ -977,7 +983,7 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
   let mediaRecorder = null;
   let recordedChunks = [];
   let recordedBlob = null;
-  let uploadedFile = null;
+  let uploadedFiles = []; // supports multiple clips
   let audioCtx = null;
   let analyser = null;
   let animFrameId = null;
@@ -1118,18 +1124,23 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
   }
 
   // — Upload —
-  function handleUpload(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    uploadedFile = file;
-    document.getElementById('fileName').textContent = file.name;
+  function setUploadedFiles(files) {
+    const audio = Array.from(files).filter(f => f.type.startsWith('audio/')).slice(0, 3);
+    if (!audio.length) return;
+    uploadedFiles = audio;
+    const label = audio.length === 1 ? audio[0].name : `${audio.length} clips seleccionados`;
+    document.getElementById('fileName').textContent = label;
     document.getElementById('fileSelected').classList.add('visible');
     document.getElementById('uploadArea').style.opacity = '0.5';
     document.getElementById('uploadArea').style.pointerEvents = 'none';
   }
 
+  function handleUpload(e) {
+    if (e.target.files.length) setUploadedFiles(e.target.files);
+  }
+
   function clearUpload() {
-    uploadedFile = null;
+    uploadedFiles = [];
     document.getElementById('uploadInput').value = '';
     document.getElementById('fileName').textContent = '';
     document.getElementById('fileSelected').classList.remove('visible');
@@ -1144,14 +1155,7 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
   uploadArea.addEventListener('drop', e => {
     e.preventDefault();
     uploadArea.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith('audio/')) {
-      uploadedFile = file;
-      document.getElementById('fileName').textContent = file.name;
-      document.getElementById('fileSelected').classList.add('visible');
-      document.getElementById('uploadArea').style.opacity = '0.5';
-      document.getElementById('uploadArea').style.pointerEvents = 'none';
-    }
+    if (e.dataTransfer.files.length) setUploadedFiles(e.dataTransfer.files);
   });
 
   // — Char count —
