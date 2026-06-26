@@ -59,18 +59,24 @@ def get_tts():
 
 def preprocess_reference(src_path: str, dst_path: str) -> bool:
     """
-    Clean the reference audio so XTTS produces natural output:
-    - convert to 22050 Hz mono WAV (XTTS native rate)
-    - loudness-normalize (consistent level)
-    - high-pass 70 Hz to cut rumble, light noise gate
-    Returns True if ffmpeg succeeded, else False (caller falls back to raw file).
+    Clean the reference audio for XTTS v2:
+    - 24000 Hz mono WAV (XTTS v2 native sample rate)
+    - loudness-normalize to consistent level
+    - high-pass 80 Hz to cut rumble, de-noise lightly
+    - trim leading/trailing silence so the model captures clean speech
     """
     try:
         subprocess.run(
             [
                 "ffmpeg", "-y", "-i", src_path,
-                "-af", "highpass=f=70,loudnorm=I=-16:TP=-1.5:LRA=11,aresample=22050",
-                "-ac", "1", "-ar", "22050",
+                "-af", (
+                    "highpass=f=80,"
+                    "loudnorm=I=-14:TP=-1:LRA=7,"
+                    "silenceremove=start_periods=1:start_silence=0.1:start_threshold=-50dB"
+                    ":stop_periods=1:stop_silence=0.3:stop_threshold=-50dB,"
+                    "aresample=24000"
+                ),
+                "-ac", "1", "-ar", "24000",
                 dst_path,
             ],
             check=True,
@@ -82,25 +88,42 @@ def preprocess_reference(src_path: str, dst_path: str) -> bool:
         return False
 
 
+def normalize_text(text: str) -> str:
+    """
+    Normalize text so XTTS produces more natural prosody:
+    - ensure sentences end with punctuation (adds rhythm/intonation cues)
+    - collapse excessive whitespace
+    """
+    import re
+    text = re.sub(r'\s+', ' ', text).strip()
+    # Add period if the text ends without any punctuation
+    if text and text[-1] not in '.!?,;:…':
+        text += '.'
+    return text
+
+
 def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
     """
-    Run XTTS synthesis with parameters tuned for natural, non-robotic output.
-    - temperature 0.75: more expressive prosody variation
-    - repetition_penalty 5.0: avoids monotone/robotic repetition
-    - top_k/top_p: balanced sampling for natural intonation
-    - enable_text_splitting: better sentence-level prosody on long text
+    XTTS v2 parameters tuned for natural, human-sounding output.
+
+    Key choices:
+    - temperature 0.85: higher variation → more natural prosody (0.75 sounds flat)
+    - repetition_penalty 2.5: low enough not to crush natural intonation patterns
+    - top_p 0.92 / top_k 60: wider sampling → less robotic monotone
+    - length_penalty 1.0: neutral (avoid stretching/compressing rhythm)
+    - enable_text_splitting: sentence-level prosody on long texts
     """
     tts = get_tts()
     tts.tts_to_file(
-        text=text,
+        text=normalize_text(text),
         speaker_wav=speaker_wav,
         language=language,
         file_path=output_path,
-        temperature=0.75,
+        temperature=0.85,
         length_penalty=1.0,
-        repetition_penalty=5.0,
-        top_k=50,
-        top_p=0.85,
+        repetition_penalty=2.5,
+        top_k=60,
+        top_p=0.92,
         speed=1.0,
         enable_text_splitting=True,
     )
