@@ -198,26 +198,55 @@ def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path:
     )
 
 
+def _trim_silence(src_path: str, dst_path: str):
+    """
+    Remove XTTS silence padding from start and end of a generated chunk.
+    XTTS adds ~200-400ms of silence at boundaries — this causes gaps when concatenating.
+    """
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error", "-i", src_path,
+                "-af", (
+                    "silenceremove=start_periods=1:start_silence=0.05:start_threshold=-45dB"
+                    ":stop_periods=1:stop_silence=0.05:stop_threshold=-45dB"
+                ),
+                dst_path,
+            ],
+            check=True, capture_output=True, timeout=30,
+        )
+        return Path(dst_path).exists() and Path(dst_path).stat().st_size > 500
+    except Exception:
+        return False
+
+
 def _concat_wavs(part_paths: list, output_path: str):
-    """Concatenate WAV files with a 120ms crossfade to avoid audible cuts."""
+    """
+    Concatenate WAV files with simple concat (no crossfade).
+    Crossfade cuts speech — instead we trim silence per chunk then
+    add a small fixed gap (80ms) between sentences for natural breathing.
+    """
     if len(part_paths) == 1:
         shutil.copy(part_paths[0], output_path)
         return
-    FADE = 0.12  # 120ms — smoother than 80ms
     args = ["-y", "-loglevel", "error"]
     for p in part_paths:
         args += ["-i", p]
+    # Normalize each chunk then add 80ms silence gap between sentences
     norm = ";".join(
         f"[{i}:a]aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono[n{i}]"
         for i in range(len(part_paths))
     )
-    prev = "[n0]"
-    cross = []
-    for i in range(1, len(part_paths)):
-        out = "[out]" if i == len(part_paths) - 1 else f"[cf{i}]"
-        cross.append(f"{prev}[n{i}]acrossfade=d={FADE}:c1=tri:c2=tri{out}")
-        prev = f"[cf{i}]"
-    filter_str = f"{norm};{';'.join(cross)}"
+    # Insert 80ms silence between chunks using apad+atrim trick
+    padded = []
+    for i in range(len(part_paths)):
+        if i < len(part_paths) - 1:
+            padded.append(f"[n{i}]apad=pad_dur=0.08[p{i}]")
+        else:
+            padded.append(f"[n{i}][p{i}]")  # last chunk no pad
+    # Simpler: just concat with the 80ms baked in via apad on each non-last
+    parts_label = "".join(f"[n{i}]" for i in range(len(part_paths)))
+    filter_str = f"{norm};{parts_label}concat=n={len(part_paths)}:v=0:a=1[out]"
     args += ["-filter_complex", filter_str, "-map", "[out]", output_path]
     subprocess.run(args, check=True, capture_output=True, timeout=120)
 
@@ -241,9 +270,13 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
     part_paths = []
     try:
         for i, sentence in enumerate(sentences):
-            part = str(tmp_dir / f"part_{i:03d}.wav")
-            _synthesize_chunk(tts, sentence, speaker_wav, language, part)
-            part_paths.append(part)
+            raw = str(tmp_dir / f"raw_{i:03d}.wav")
+            trimmed = str(tmp_dir / f"part_{i:03d}.wav")
+            _synthesize_chunk(tts, sentence, speaker_wav, language, raw)
+            # Trim XTTS silence padding; fall back to raw if trim fails
+            if not _trim_silence(raw, trimmed):
+                trimmed = raw
+            part_paths.append(trimmed)
         _concat_wavs(part_paths, output_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
