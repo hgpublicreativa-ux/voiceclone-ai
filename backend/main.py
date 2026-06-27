@@ -77,8 +77,13 @@ def preprocess_reference(src_path: str, dst_path: str) -> bool:
                     "highpass=f=80,"
                     "afftdn=nf=-30:tr=1,"
                     "loudnorm=I=-16:TP=-1.5:LRA=11,"
-                    "silenceremove=start_periods=1:start_silence=0.1:start_threshold=-50dB"
-                    ":stop_periods=1:stop_silence=0.1:stop_threshold=-50dB,"
+                    # Trim leading + trailing silence only (reverse trick) so we
+                    # never truncate the reference at an internal pause — XTTS
+                    # needs as much real speech as possible to capture the voice.
+                    "silenceremove=start_periods=1:start_silence=0.1:start_threshold=-50dB,"
+                    "areverse,"
+                    "silenceremove=start_periods=1:start_silence=0.1:start_threshold=-50dB,"
+                    "areverse,"
                     "aresample=24000"
                 ),
                 "-ac", "1", "-ar", "24000",
@@ -237,8 +242,14 @@ def _trim_silence(src_path: str, dst_path: str):
             [
                 "ffmpeg", "-y", "-loglevel", "error", "-i", src_path,
                 "-af", (
-                    "silenceremove=start_periods=1:start_silence=0.05:start_threshold=-45dB"
-                    ":stop_periods=1:stop_silence=0.05:stop_threshold=-45dB"
+                    # Trim ONLY the leading and trailing silence. Using
+                    # stop_periods=1 here would cut the chunk at its first
+                    # internal pause (comma/breath); reverse+trim+reverse trims
+                    # the tail without touching pauses inside the speech.
+                    "silenceremove=start_periods=1:start_silence=0.05:start_threshold=-45dB,"
+                    "areverse,"
+                    "silenceremove=start_periods=1:start_silence=0.05:start_threshold=-45dB,"
+                    "areverse"
                 ),
                 dst_path,
             ],
@@ -401,7 +412,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-27c"
+BUILD_VERSION = "vq-2026-06-27d"
 
 @app.get("/health")
 def health():
