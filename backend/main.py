@@ -59,12 +59,14 @@ def get_tts():
 
 def preprocess_reference(src_path: str, dst_path: str) -> bool:
     """
-    Aggressive audio cleanup for XTTS v2 reference:
-    - afftdn: aggressive FFT denoising (nf=-18)
-    - high-pass 100Hz: cut rumble more aggressively
-    - anlmdn: neural speech denoise
-    - loudnorm: normalize to -13 LUFS for clarity
-    - trim silence with tight thresholds
+    Gentle audio cleanup for XTTS v2 reference.
+    The goal is to keep the speaker's real timbre intact — over-processing
+    (double denoisers, heavy loudnorm) strips the vocal detail XTTS needs to
+    sound like the original person and makes the clone sound generic.
+    - high-pass 80Hz: remove rumble only, keep low-mid warmth
+    - afftdn: single light FFT denoise (nf=-30, gentle)
+    - loudnorm: standard -16 LUFS target with wide LRA to preserve dynamics
+    - trim silence with relaxed thresholds (don't clip soft speech)
     - 24000 Hz mono WAV (XTTS v2 native)
     """
     try:
@@ -72,12 +74,11 @@ def preprocess_reference(src_path: str, dst_path: str) -> bool:
             [
                 "ffmpeg", "-y", "-i", src_path,
                 "-af", (
-                    "afftdn=nf=-18:tr=1,"
-                    "anlmdn=s=0.002,"
-                    "highpass=f=100,"
-                    "loudnorm=I=-13:TP=-1:LRA=5,"
-                    "silenceremove=start_periods=1:start_silence=0.05:start_threshold=-48dB"
-                    ":stop_periods=1:stop_silence=0.05:stop_threshold=-48dB,"
+                    "highpass=f=80,"
+                    "afftdn=nf=-30:tr=1,"
+                    "loudnorm=I=-16:TP=-1.5:LRA=11,"
+                    "silenceremove=start_periods=1:start_silence=0.1:start_threshold=-50dB"
+                    ":stop_periods=1:stop_silence=0.1:stop_threshold=-50dB,"
                     "aresample=24000"
                 ),
                 "-ac", "1", "-ar", "24000",
@@ -222,11 +223,12 @@ def _trim_silence(src_path: str, dst_path: str):
         return False
 
 
-def _concat_wavs(part_paths: list, output_path: str):
+def _concat_wavs(part_paths: list, output_path: str, gap_dur: float = 0.15):
     """
-    Concatenate WAV files with simple concat (no crossfade).
-    Crossfade cuts speech — instead we trim silence per chunk then
-    add a small fixed gap (80ms) between sentences for natural breathing.
+    Concatenate WAV files with a natural breathing pause between sentences.
+    Crossfade cuts speech — instead we trim silence per chunk, then add a
+    fixed silent gap (default 150ms) after every sentence except the last so
+    the speech doesn't run together (which is what makes it sound monotone).
     """
     if len(part_paths) == 1:
         shutil.copy(part_paths[0], output_path)
@@ -234,39 +236,40 @@ def _concat_wavs(part_paths: list, output_path: str):
     args = ["-y", "-loglevel", "error"]
     for p in part_paths:
         args += ["-i", p]
-    # Normalize each chunk then add 80ms silence gap between sentences
-    norm = ";".join(
-        f"[{i}:a]aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono[n{i}]"
-        for i in range(len(part_paths))
-    )
-    # Insert 80ms silence between chunks using apad+atrim trick
-    padded = []
+    # Normalize each chunk; pad every chunk but the last with a silent gap
+    # so the gap is actually baked into the concatenated stream.
+    norm_parts = []
     for i in range(len(part_paths)):
+        chain = f"[{i}:a]aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono"
         if i < len(part_paths) - 1:
-            padded.append(f"[n{i}]apad=pad_dur=0.08[p{i}]")
-        else:
-            padded.append(f"[n{i}][p{i}]")  # last chunk no pad
-    # Simpler: just concat with the 80ms baked in via apad on each non-last
+            chain += f",apad=pad_dur={gap_dur}"
+        chain += f"[n{i}]"
+        norm_parts.append(chain)
+    norm = ";".join(norm_parts)
     parts_label = "".join(f"[n{i}]" for i in range(len(part_paths)))
     filter_str = f"{norm};{parts_label}concat=n={len(part_paths)}:v=0:a=1[out]"
     args += ["-filter_complex", filter_str, "-map", "[out]", output_path]
     subprocess.run(args, check=True, capture_output=True, timeout=120)
 
 
-def _adjust_tempo_to_2_5_wps(text: str, audio_path: str, output_path: str) -> bool:
+def _adjust_tempo_to_natural(text: str, audio_path: str, output_path: str) -> bool:
     """
-    Adjust audio tempo so final speed = 2.5 words per second.
-    - Count words in text
-    - Measure actual audio duration
-    - Calculate tempo adjustment factor
-    - Apply atempo filter
+    Keep the reading speed in a natural band instead of forcing an exact rate.
+    Forcing every clip to a fixed words-per-second with atempo time-stretches
+    the whole audio, which is what makes XTTS output sound robotic. Natural
+    Spanish narration sits around 2.3–3.3 wps, so we only nudge clips that fall
+    clearly outside that band, and we cap the correction to ±12% so the stretch
+    stays inaudible (atempo only sounds clean very close to 1.0x).
     """
     words = len(text.split())
-    target_duration = words / 2.5  # seconds needed for 2.5 wps
+    if words == 0:
+        shutil.copy(audio_path, output_path)
+        return True
+
+    NATURAL_LOW, NATURAL_HIGH = 2.3, 3.3  # words per second
+    TEMPO_MIN, TEMPO_MAX = 0.9, 1.12      # ±~12% — stays transparent
 
     try:
-        # Probe actual duration
-        import json
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "json", audio_path],
@@ -275,12 +278,18 @@ def _adjust_tempo_to_2_5_wps(text: str, audio_path: str, output_path: str) -> bo
         data = json.loads(probe.stdout)
         actual_duration = float(data.get("format", {}).get("duration", 0))
         if actual_duration <= 0:
-            return False
+            shutil.copy(audio_path, output_path)
+            return True
 
-        # Calculate tempo factor: atempo range is 0.5x to 2.0x
-        tempo = actual_duration / target_duration
-        if tempo < 0.5 or tempo > 2.0:
-            # Out of range — just return original
+        wps = words / actual_duration
+        if NATURAL_LOW <= wps <= NATURAL_HIGH:
+            # Already natural — leave the prosody untouched.
+            shutil.copy(audio_path, output_path)
+            return True
+
+        target = NATURAL_LOW if wps < NATURAL_LOW else NATURAL_HIGH
+        tempo = max(TEMPO_MIN, min(TEMPO_MAX, target / wps))
+        if abs(tempo - 1.0) < 0.02:
             shutil.copy(audio_path, output_path)
             return True
 
@@ -298,8 +307,8 @@ def _adjust_tempo_to_2_5_wps(text: str, audio_path: str, output_path: str) -> bo
 
 def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
     """
-    Split text into sentences, generate each with XTTS, then concat.
-    Finally adjust tempo to exactly 2.5 words per second.
+    Split text into sentences, generate each with XTTS, concat with natural
+    pauses, then keep the overall reading speed within a natural band.
     """
     tts = get_tts()
     text = normalize_text(text)
@@ -308,11 +317,10 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
     if len(sentences) == 1:
         raw = str(Path(output_path).parent / f"raw_{uuid.uuid4().hex[:6]}.wav")
         _synthesize_chunk(tts, sentences[0], speaker_wav, language, raw)
-        # Adjust tempo then clean up temp
-        success = _adjust_tempo_to_2_5_wps(sentences[0], raw, output_path)
-        Path(raw).unlink(missing_ok=True)
-        if not success:
+        # Keep tempo natural; fall back to the raw chunk before cleaning it up.
+        if not _adjust_tempo_to_natural(sentences[0], raw, output_path):
             shutil.copy(raw, output_path)
+        Path(raw).unlink(missing_ok=True)
         return
 
     tmp_dir = Path(output_path).parent / f"synth_tmp_{uuid.uuid4().hex[:6]}"
@@ -329,8 +337,9 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
             part_paths.append(trimmed)
         concat_tmp = str(tmp_dir / "concat.wav")
         _concat_wavs(part_paths, concat_tmp)
-        # Adjust final concat to 2.5 wps
-        _adjust_tempo_to_2_5_wps(text, concat_tmp, output_path)
+        # Keep the final reading speed natural (gentle, only if out of band).
+        if not _adjust_tempo_to_natural(text, concat_tmp, output_path):
+            shutil.copy(concat_tmp, output_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
