@@ -59,23 +59,25 @@ def get_tts():
 
 def preprocess_reference(src_path: str, dst_path: str) -> bool:
     """
-    Clean the reference audio for XTTS v2:
-    - afftdn: FFT-based noise reduction before any filtering
-    - high-pass 80 Hz to cut rumble
-    - loudness-normalize to consistent level
-    - trim leading/trailing silence
-    - 24000 Hz mono WAV (XTTS v2 native sample rate)
+    Aggressive audio cleanup for XTTS v2 reference:
+    - afftdn: aggressive FFT denoising (nf=-18)
+    - high-pass 100Hz: cut rumble more aggressively
+    - anlmdn: neural speech denoise
+    - loudnorm: normalize to -13 LUFS for clarity
+    - trim silence with tight thresholds
+    - 24000 Hz mono WAV (XTTS v2 native)
     """
     try:
         subprocess.run(
             [
                 "ffmpeg", "-y", "-i", src_path,
                 "-af", (
-                    "afftdn=nf=-25,"
-                    "highpass=f=80,"
-                    "loudnorm=I=-14:TP=-1:LRA=7,"
-                    "silenceremove=start_periods=1:start_silence=0.1:start_threshold=-50dB"
-                    ":stop_periods=1:stop_silence=0.3:stop_threshold=-50dB,"
+                    "afftdn=nf=-18:tr=1,"
+                    "anlmdn=s=0.002,"
+                    "highpass=f=100,"
+                    "loudnorm=I=-13:TP=-1:LRA=5,"
+                    "silenceremove=start_periods=1:start_silence=0.05:start_threshold=-48dB"
+                    ":stop_periods=1:stop_silence=0.05:stop_threshold=-48dB,"
                     "aresample=24000"
                 ),
                 "-ac", "1", "-ar", "24000",
