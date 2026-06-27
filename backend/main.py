@@ -149,6 +149,32 @@ def normalize_text(text: str) -> str:
     return text
 
 
+# XTTS v2 only accepts these base language codes (no regional variants).
+XTTS_LANGS = {
+    "en", "es", "fr", "de", "it", "pt", "pl", "tr",
+    "ru", "nl", "cs", "ar", "zh-cn", "hu", "ko", "ja", "hi",
+}
+
+def normalize_language(lang: str) -> str:
+    """
+    Map a possibly regional language code to one XTTS v2 understands.
+    The UI may send variants like 'es-co' (Colombian), 'es-mx', 'pt-br' — XTTS
+    only knows the base language ('es', 'pt', ...), so strip the region.
+    Chinese is the one exception: its XTTS code is 'zh-cn'.
+    """
+    if not lang:
+        return "es"
+    lang = lang.strip().lower()
+    if lang in XTTS_LANGS:
+        return lang
+    base = lang.split("-")[0]
+    if base == "zh":
+        return "zh-cn"
+    if base in XTTS_LANGS:
+        return base
+    return "es"  # safe default
+
+
 def split_sentences(text: str, max_chars: int = 180) -> list:
     """
     Split text into sentence-level chunks for XTTS.
@@ -311,6 +337,7 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
     pauses, then keep the overall reading speed within a natural band.
     """
     tts = get_tts()
+    language = normalize_language(language)
     text = normalize_text(text)
     sentences = split_sentences(text)
 
@@ -374,7 +401,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-27a"
+BUILD_VERSION = "vq-2026-06-27b"
 
 @app.get("/health")
 def health():
