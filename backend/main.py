@@ -469,7 +469,7 @@ def delete_voice(voice_id: str, _: None = Depends(require_admin)):
 class SpeakRequest(BaseModel):
     text: str
     voice_id: Optional[str] = None
-    language: str = "es-mx"
+    language: str = "es-co"
 
 @app.post("/speak")
 def speak(
