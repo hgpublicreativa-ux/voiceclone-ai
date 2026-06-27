@@ -259,7 +259,7 @@ def _concat_wavs(part_paths: list, output_path: str, gap_dur: float = 0.15):
     if len(part_paths) == 1:
         shutil.copy(part_paths[0], output_path)
         return
-    args = ["-y", "-loglevel", "error"]
+    args = ["ffmpeg", "-y", "-loglevel", "error"]
     for p in part_paths:
         args += ["-i", p]
     # Normalize each chunk; pad every chunk but the last with a silent gap
@@ -401,7 +401,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-27b"
+BUILD_VERSION = "vq-2026-06-27c"
 
 @app.get("/health")
 def health():
