@@ -188,9 +188,9 @@ def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path:
         speaker_wav=speaker_wav,
         language=language,
         file_path=out_path,
-        temperature=0.85,
+        temperature=0.95,  # higher → more expressive, enthusiastic
         length_penalty=1.0,
-        repetition_penalty=2.5,
+        repetition_penalty=2.0,  # lower → allows more prosody variation
         top_k=60,
         top_p=0.92,
         speed=1.0,
