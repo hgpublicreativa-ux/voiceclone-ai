@@ -253,18 +253,66 @@ def _concat_wavs(part_paths: list, output_path: str):
     subprocess.run(args, check=True, capture_output=True, timeout=120)
 
 
+def _adjust_tempo_to_2_5_wps(text: str, audio_path: str, output_path: str) -> bool:
+    """
+    Adjust audio tempo so final speed = 2.5 words per second.
+    - Count words in text
+    - Measure actual audio duration
+    - Calculate tempo adjustment factor
+    - Apply atempo filter
+    """
+    words = len(text.split())
+    target_duration = words / 2.5  # seconds needed for 2.5 wps
+
+    try:
+        # Probe actual duration
+        import json
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", audio_path],
+            capture_output=True, text=True, timeout=10
+        )
+        data = json.loads(probe.stdout)
+        actual_duration = float(data.get("format", {}).get("duration", 0))
+        if actual_duration <= 0:
+            return False
+
+        # Calculate tempo factor: atempo range is 0.5x to 2.0x
+        tempo = actual_duration / target_duration
+        if tempo < 0.5 or tempo > 2.0:
+            # Out of range — just return original
+            shutil.copy(audio_path, output_path)
+            return True
+
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", audio_path,
+             "-af", f"atempo={tempo}",
+             "-ar", "24000", "-ac", "1",
+             output_path],
+            check=True, capture_output=True, timeout=30
+        )
+        return Path(output_path).exists() and Path(output_path).stat().st_size > 500
+    except Exception:
+        return False
+
+
 def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
     """
     Split text into sentences, generate each with XTTS, then concat.
-    Doing our own splitting prevents XTTS internal splitting artifacts
-    (cut words, hallucinated sounds at boundaries).
+    Finally adjust tempo to exactly 2.5 words per second.
     """
     tts = get_tts()
     text = normalize_text(text)
     sentences = split_sentences(text)
 
     if len(sentences) == 1:
-        _synthesize_chunk(tts, sentences[0], speaker_wav, language, output_path)
+        raw = str(Path(output_path).parent / f"raw_{uuid.uuid4().hex[:6]}.wav")
+        _synthesize_chunk(tts, sentences[0], speaker_wav, language, raw)
+        # Adjust tempo then clean up temp
+        success = _adjust_tempo_to_2_5_wps(sentences[0], raw, output_path)
+        Path(raw).unlink(missing_ok=True)
+        if not success:
+            shutil.copy(raw, output_path)
         return
 
     tmp_dir = Path(output_path).parent / f"synth_tmp_{uuid.uuid4().hex[:6]}"
@@ -279,7 +327,10 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
             if not _trim_silence(raw, trimmed):
                 trimmed = raw
             part_paths.append(trimmed)
-        _concat_wavs(part_paths, output_path)
+        concat_tmp = str(tmp_dir / "concat.wav")
+        _concat_wavs(part_paths, concat_tmp)
+        # Adjust final concat to 2.5 wps
+        _adjust_tempo_to_2_5_wps(text, concat_tmp, output_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
