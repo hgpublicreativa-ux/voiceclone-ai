@@ -372,9 +372,13 @@ def require_api_key(x_api_key: str = Header(...)):
     return keys[x_api_key]
 
 # ── Health ────────────────────────────────────────────────────────────────────
+# Bump BUILD_VERSION on every deploy so we can confirm from outside that the
+# new container has actually rolled out (Railway rebuilds take several minutes).
+BUILD_VERSION = "vq-2026-06-27a"
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "build": BUILD_VERSION}
 
 @app.get("/")
 def root():
