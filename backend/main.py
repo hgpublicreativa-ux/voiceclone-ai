@@ -180,16 +180,39 @@ def normalize_language(lang: str) -> str:
     return "es"  # safe default
 
 
-def split_sentences(text: str, max_chars: int = 220) -> list:
+def _split_by_words(text: str, max_chars: int) -> list:
+    """Last-resort split for a fragment with no commas: break on word boundaries
+    so no chunk ever exceeds max_chars (XTTS throws 'index out of range in self'
+    when a chunk is longer than the model's token limit)."""
+    words = text.split()
+    out, current = [], ""
+    for w in words:
+        candidate = (current + " " + w).strip() if current else w
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                out.append(current)
+            # A single word longer than max_chars: hard-slice it.
+            while len(w) > max_chars:
+                out.append(w[:max_chars])
+                w = w[max_chars:]
+            current = w
+    if current:
+        out.append(current)
+    return out
+
+
+def split_sentences(text: str, max_chars: int = 200) -> list:
     """
     Split text into sentence-level chunks for XTTS while PRESERVING the
     punctuation that drives intonation (¿ ? ¡ ! …). Terminal marks are what
     make XTTS raise the pitch for questions and add energy for exclamations,
     so we never strip them.
     - Split on sentence-ending punctuation, keeping the mark.
-    - Only break an over-long sentence on commas, and re-attach the sentence's
-      terminal mark (? ! …) to the last fragment so the intonation survives.
-    - Max 220 chars per chunk (XTTS is stable up to ~250).
+    - Break an over-long sentence on commas, then on words if still too long,
+      so NO chunk ever exceeds max_chars (prevents 'index out of range').
+    - Re-attach the sentence's terminal mark (? ! …) to the last fragment.
     """
     raw = re.split(r'(?<=[.!?…])\s+', text.strip())
     chunks = []
@@ -212,11 +235,16 @@ def split_sentences(text: str, max_chars: int = 220) -> list:
             else:
                 if current:
                     sub.append(current.strip(", "))
-                current = part
+                # The comma-part itself may still be too long → split by words.
+                if len(part) > max_chars:
+                    sub.extend(_split_by_words(part, max_chars))
+                    current = ""
+                else:
+                    current = part
         if current:
             sub.append(current.strip(", "))
         # Keep the question/exclamation intonation on the final fragment.
-        if sub and terminal and sub[-1][-1] not in '.!?…':
+        if sub and terminal and sub[-1] and sub[-1][-1] not in '.!?…':
             sub[-1] += terminal
         chunks.extend(sub)
     return [c for c in chunks if c]
@@ -228,28 +256,40 @@ def split_sentences(text: str, max_chars: int = 220) -> list:
 STYLE_PRESETS = {
     "calmado":   {"temperature": 0.60, "repetition_penalty": 3.0, "top_k": 50, "top_p": 0.85, "speed": 0.97},
     "natural":   {"temperature": 0.78, "repetition_penalty": 2.4, "top_k": 55, "top_p": 0.88, "speed": 1.0},
-    "expresivo": {"temperature": 0.92, "repetition_penalty": 1.9, "top_k": 60, "top_p": 0.92, "speed": 1.0},
-    "energico":  {"temperature": 1.0,  "repetition_penalty": 1.7, "top_k": 65, "top_p": 0.95, "speed": 1.05},
+    "expresivo": {"temperature": 0.90, "repetition_penalty": 2.0, "top_k": 60, "top_p": 0.90, "speed": 1.0},
+    "energico":  {"temperature": 0.95, "repetition_penalty": 1.8, "top_k": 65, "top_p": 0.94, "speed": 1.05},
 }
 DEFAULT_STYLE = "expresivo"
 
+# Conservative fallback params used when a chunk fails to generate (e.g. XTTS
+# 'index out of range in self' from runaway generation at high temperature).
+_SAFE_PARAMS = {"temperature": 0.65, "repetition_penalty": 3.0, "top_k": 50, "top_p": 0.85, "speed": 1.0}
+
 
 def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path: str, style: str = DEFAULT_STYLE):
-    """Generate a single short chunk — no internal splitting."""
+    """Generate a single short chunk — no internal splitting.
+    Retries once with conservative params if XTTS throws (high-temperature
+    runaway can raise 'index out of range in self')."""
     p = STYLE_PRESETS.get(style, STYLE_PRESETS[DEFAULT_STYLE])
-    tts.tts_to_file(
-        text=text,
-        speaker_wav=speaker_wav,
-        language=language,
-        file_path=out_path,
-        temperature=p["temperature"],
-        length_penalty=1.0,
-        repetition_penalty=p["repetition_penalty"],
-        top_k=p["top_k"],
-        top_p=p["top_p"],
-        speed=p["speed"],
-        enable_text_splitting=False,  # we handle splitting ourselves
-    )
+    for params in (p, _SAFE_PARAMS):
+        try:
+            tts.tts_to_file(
+                text=text,
+                speaker_wav=speaker_wav,
+                language=language,
+                file_path=out_path,
+                temperature=params["temperature"],
+                length_penalty=1.0,
+                repetition_penalty=params["repetition_penalty"],
+                top_k=params["top_k"],
+                top_p=params["top_p"],
+                speed=params["speed"],
+                enable_text_splitting=False,  # we handle splitting ourselves
+            )
+            return
+        except Exception:
+            if params is _SAFE_PARAMS:
+                raise  # both attempts failed — propagate
 
 
 def _trim_silence(src_path: str, dst_path: str):
@@ -433,7 +473,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-29-punct"
+BUILD_VERSION = "vq-2026-06-29-splitfix"
 
 @app.get("/health")
 def health():
