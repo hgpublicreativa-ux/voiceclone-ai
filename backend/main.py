@@ -222,19 +222,32 @@ def split_sentences(text: str, max_chars: int = 220) -> list:
     return [c for c in chunks if c]
 
 
-def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path: str):
+# Expressiveness presets. Higher temperature + lower repetition_penalty =
+# more prosody variation (energetic/emotional). Lower temperature = calmer,
+# more controlled. speed nudges the reading pace.
+STYLE_PRESETS = {
+    "calmado":   {"temperature": 0.60, "repetition_penalty": 3.0, "top_k": 50, "top_p": 0.85, "speed": 0.97},
+    "natural":   {"temperature": 0.78, "repetition_penalty": 2.4, "top_k": 55, "top_p": 0.88, "speed": 1.0},
+    "expresivo": {"temperature": 0.92, "repetition_penalty": 1.9, "top_k": 60, "top_p": 0.92, "speed": 1.0},
+    "energico":  {"temperature": 1.0,  "repetition_penalty": 1.7, "top_k": 65, "top_p": 0.95, "speed": 1.05},
+}
+DEFAULT_STYLE = "expresivo"
+
+
+def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path: str, style: str = DEFAULT_STYLE):
     """Generate a single short chunk — no internal splitting."""
+    p = STYLE_PRESETS.get(style, STYLE_PRESETS[DEFAULT_STYLE])
     tts.tts_to_file(
         text=text,
         speaker_wav=speaker_wav,
         language=language,
         file_path=out_path,
-        temperature=0.95,  # very expressive, emotional
+        temperature=p["temperature"],
         length_penalty=1.0,
-        repetition_penalty=1.8,  # very low: allow high prosody variation
-        top_k=60,
-        top_p=0.92,
-        speed=1.0,
+        repetition_penalty=p["repetition_penalty"],
+        top_k=p["top_k"],
+        top_p=p["top_p"],
+        speed=p["speed"],
         enable_text_splitting=False,  # we handle splitting ourselves
     )
 
@@ -349,10 +362,11 @@ def _adjust_tempo_to_natural(text: str, audio_path: str, output_path: str) -> bo
         return False
 
 
-def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
+def synthesize(text: str, speaker_wav: str, language: str, output_path: str, style: str = DEFAULT_STYLE):
     """
     Split text into sentences, generate each with XTTS, concat with natural
     pauses, then keep the overall reading speed within a natural band.
+    `style` selects an expressiveness preset (see STYLE_PRESETS).
     """
     tts = get_tts()
     language = normalize_language(language)
@@ -361,7 +375,7 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
 
     if len(sentences) == 1:
         raw = str(Path(output_path).parent / f"raw_{uuid.uuid4().hex[:6]}.wav")
-        _synthesize_chunk(tts, sentences[0], speaker_wav, language, raw)
+        _synthesize_chunk(tts, sentences[0], speaker_wav, language, raw, style)
         # Keep tempo natural; fall back to the raw chunk before cleaning it up.
         if not _adjust_tempo_to_natural(sentences[0], raw, output_path):
             shutil.copy(raw, output_path)
@@ -375,7 +389,7 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str):
         for i, sentence in enumerate(sentences):
             raw = str(tmp_dir / f"raw_{i:03d}.wav")
             trimmed = str(tmp_dir / f"part_{i:03d}.wav")
-            _synthesize_chunk(tts, sentence, speaker_wav, language, raw)
+            _synthesize_chunk(tts, sentence, speaker_wav, language, raw, style)
             # Trim XTTS silence padding; fall back to raw if trim fails
             if not _trim_silence(raw, trimmed):
                 trimmed = raw
@@ -528,6 +542,7 @@ class SpeakRequest(BaseModel):
     text: str
     voice_id: Optional[str] = None
     language: str = "es-co"
+    style: str = DEFAULT_STYLE  # calmado | natural | expresivo | energico
 
 @app.post("/speak")
 def speak(
@@ -558,7 +573,7 @@ def speak(
 
     output_path = OUTPUTS_DIR / f"{uuid.uuid4()}.wav"
     try:
-        synthesize(req.text, speaker_wav, req.language, str(output_path))
+        synthesize(req.text, speaker_wav, req.language, str(output_path), req.style)
     except Exception as e:
         output_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Error TTS: {str(e)}")
@@ -571,6 +586,7 @@ async def clone_voice(
     audio: UploadFile = File(...),
     text: str = Form(...),
     language: str = Form(default="es"),
+    style: str = Form(default=DEFAULT_STYLE),
 ):
     """Clone voice on the fly without saving. For frontend testing."""
     if not text.strip():
@@ -583,7 +599,7 @@ async def clone_voice(
         shutil.copyfileobj(audio.file, f)
 
     try:
-        synthesize(text, str(tmp_path), language, str(output_path))
+        synthesize(text, str(tmp_path), language, str(output_path), style)
     except Exception as e:
         output_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Error TTS: {str(e)}")
@@ -676,7 +692,7 @@ def voice_library_generate(req: SpeakRequest):
 
     output_path = OUTPUTS_DIR / f"{uuid.uuid4()}.wav"
     try:
-        synthesize(req.text, speaker_wav, req.language, str(output_path))
+        synthesize(req.text, speaker_wav, req.language, str(output_path), req.style)
     except Exception as e:
         output_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=f"Error TTS: {str(e)}")

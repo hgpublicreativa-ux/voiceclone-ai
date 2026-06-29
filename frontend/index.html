@@ -799,15 +799,26 @@
   <div class="card">
     <div class="card-label">04 — Texto e idioma</div>
 
-    <select class="lang-select" id="langSelect">
-      <option value="es-co" selected>🇨🇴 Español Colombiano</option>
-      <option value="en">🇬🇧 English</option>
-      <option value="fr">🇫🇷 Français</option>
-      <option value="de">🇩🇪 Deutsch</option>
-      <option value="pt">🇧🇷 Português</option>
-      <option value="it">🇮🇹 Italiano</option>
-      <option value="zh">🇨🇳 中文</option>
-    </select>
+    <div style="display:flex; gap:12px; flex-wrap:wrap;">
+      <select class="lang-select" id="langSelect" style="flex:1; min-width:200px; margin-bottom:0;">
+        <option value="es-co" selected>🇨🇴 Español Colombiano</option>
+        <option value="en">🇬🇧 English</option>
+        <option value="fr">🇫🇷 Français</option>
+        <option value="de">🇩🇪 Deutsch</option>
+        <option value="pt">🇧🇷 Português</option>
+        <option value="it">🇮🇹 Italiano</option>
+        <option value="zh">🇨🇳 中文</option>
+      </select>
+      <select class="lang-select" id="styleSelect" style="flex:1; min-width:200px; margin-bottom:0;">
+        <option value="calmado">😌 Calmado</option>
+        <option value="natural">🗣 Natural</option>
+        <option value="expresivo" selected>✨ Expresivo</option>
+        <option value="energico">🔥 Enérgico</option>
+      </select>
+    </div>
+    <p style="font-size:11px; color:var(--text-muted); margin:8px 0 16px; letter-spacing:0.03em;">
+      El estilo controla la expresividad. Enérgico = más emoción y variación de tono.
+    </p>
 
     <textarea
       class="text-input"
@@ -1182,6 +1193,7 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
   async function cloneVoice() {
     const text = document.getElementById('textInput').value.trim();
     const language = document.getElementById('langSelect').value;
+    const style = document.getElementById('styleSelect').value;
 
     if (!text) return showError('Escribe el texto que quieres generar.');
     if (!selectedVoiceId) return showError('Selecciona o guarda una voz en la biblioteca primero.');
@@ -1194,7 +1206,7 @@ X-API-Key: vc-7ePB6PxWdjq__EcgHOteZ_gJ2P8jPNnw2z6Fv-6IwEQ
       const res = await fetch(`${API}/voice/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voice_id: selectedVoiceId, language }),
+        body: JSON.stringify({ text, voice_id: selectedVoiceId, language, style }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'Error desconocido' }));
