@@ -180,16 +180,17 @@ def normalize_language(lang: str) -> str:
     return "es"  # safe default
 
 
-def split_sentences(text: str, max_chars: int = 180) -> list:
+def split_sentences(text: str, max_chars: int = 220) -> list:
     """
-    Split text into sentence-level chunks for XTTS.
-    We do our own splitting and disable XTTS internal splitting to avoid
-    artifacts and hallucinated sounds at chunk boundaries.
-    - Split on sentence-ending punctuation
-    - If a sentence is still too long, split on commas
-    - Max 180 chars per chunk (XTTS is most stable under ~200)
+    Split text into sentence-level chunks for XTTS while PRESERVING the
+    punctuation that drives intonation (¿ ? ¡ ! …). Terminal marks are what
+    make XTTS raise the pitch for questions and add energy for exclamations,
+    so we never strip them.
+    - Split on sentence-ending punctuation, keeping the mark.
+    - Only break an over-long sentence on commas, and re-attach the sentence's
+      terminal mark (? ! …) to the last fragment so the intonation survives.
+    - Max 220 chars per chunk (XTTS is stable up to ~250).
     """
-    # Split on sentence boundaries keeping the delimiter
     raw = re.split(r'(?<=[.!?…])\s+', text.strip())
     chunks = []
     for sentence in raw:
@@ -198,20 +199,26 @@ def split_sentences(text: str, max_chars: int = 180) -> list:
             continue
         if len(sentence) <= max_chars:
             chunks.append(sentence)
-        else:
-            # Too long — split on commas
-            parts = re.split(r',\s*', sentence)
-            current = ""
-            for part in parts:
-                candidate = (current + ", " + part).strip(", ") if current else part
-                if len(candidate) <= max_chars:
-                    current = candidate
-                else:
-                    if current:
-                        chunks.append(current.strip(", "))
-                    current = part
-            if current:
-                chunks.append(current.strip(", "))
+            continue
+        # Over-long: remember the terminal mark, split on commas, restore it.
+        terminal = sentence[-1] if sentence[-1] in '.!?…' else ''
+        parts = re.split(r',\s*', sentence)
+        sub = []
+        current = ""
+        for part in parts:
+            candidate = (current + ", " + part).strip(", ") if current else part
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current:
+                    sub.append(current.strip(", "))
+                current = part
+        if current:
+            sub.append(current.strip(", "))
+        # Keep the question/exclamation intonation on the final fragment.
+        if sub and terminal and sub[-1][-1] not in '.!?…':
+            sub[-1] += terminal
+        chunks.extend(sub)
     return [c for c in chunks if c]
 
 
@@ -412,7 +419,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-27d"
+BUILD_VERSION = "vq-2026-06-29-punct"
 
 @app.get("/health")
 def health():
