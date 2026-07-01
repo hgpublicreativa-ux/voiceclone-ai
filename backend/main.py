@@ -266,11 +266,37 @@ DEFAULT_STYLE = "expresivo"
 _SAFE_PARAMS = {"temperature": 0.65, "repetition_penalty": 3.0, "top_k": 50, "top_p": 0.85, "speed": 1.0}
 
 
+def _ensure_spanish_marks(text: str, language: str) -> str:
+    """
+    XTTS intones Spanish questions/exclamations far better when the OPENING
+    mark (¿ / ¡) is present — the closing ? / ! alone barely changes the
+    prosody. If the writer only used the closing mark, add the opening one so
+    the model actually raises the pitch on questions and adds energy on
+    exclamations.
+    """
+    if not language.startswith("es"):
+        return text
+    t = text.strip()
+    if not t:
+        return t
+    if t.endswith("?") and "¿" not in t:
+        t = "¿" + t
+    elif t.endswith("!") and "¡" not in t:
+        t = "¡" + t
+    return t
+
+
 def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path: str, style: str = DEFAULT_STYLE):
     """Generate a single short chunk — no internal splitting.
     Retries once with conservative params if XTTS throws (high-temperature
     runaway can raise 'index out of range in self')."""
-    p = STYLE_PRESETS.get(style, STYLE_PRESETS[DEFAULT_STYLE])
+    text = _ensure_spanish_marks(text, language)
+    p = dict(STYLE_PRESETS.get(style, STYLE_PRESETS[DEFAULT_STYLE]))
+    # Give questions and exclamations extra prosodic energy so the intonation
+    # actually lands (more temperature variation, less repetition damping).
+    if text.rstrip()[-1:] in "?!":
+        p["temperature"] = min(1.0, p["temperature"] + 0.08)
+        p["repetition_penalty"] = max(1.5, p["repetition_penalty"] - 0.3)
     for params in (p, _SAFE_PARAMS):
         try:
             tts.tts_to_file(
@@ -473,7 +499,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-29-splitfix"
+BUILD_VERSION = "vq-2026-06-30-intonation"
 
 @app.get("/health")
 def health():
