@@ -313,6 +313,13 @@ def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path:
                 top_p=params["top_p"],
                 speed=params["speed"],
                 enable_text_splitting=False,  # we handle splitting ourselves
+                # Voice-conditioning tuning: use up to 30s of the reference
+                # (in 6s windows) so XTTS captures more of the real timbre
+                # instead of just the first ~4s. sound_norm_refs re-normalizes
+                # the reference internally for more consistent cloning.
+                gpt_cond_len=30,
+                gpt_cond_chunk_len=6,
+                sound_norm_refs=True,
             )
             return
         except Exception:
@@ -501,7 +508,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-30-antihallucination"
+BUILD_VERSION = "vq-2026-06-30-gptcond30"
 
 @app.get("/health")
 def health():
