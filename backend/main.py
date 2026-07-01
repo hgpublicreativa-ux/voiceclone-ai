@@ -251,13 +251,15 @@ def split_sentences(text: str, max_chars: int = 200) -> list:
 
 
 # Expressiveness presets. Higher temperature + lower repetition_penalty =
-# more prosody variation (energetic/emotional). Lower temperature = calmer,
-# more controlled. speed nudges the reading pace.
+# more prosody variation, but also more risk of XTTS hallucinating extra
+# words after the intended text ends — that failure mode gets worse fast
+# above ~0.85 temperature / below ~2.0 repetition_penalty, so the top presets
+# are capped there instead of chasing maximum expressiveness.
 STYLE_PRESETS = {
-    "calmado":   {"temperature": 0.60, "repetition_penalty": 3.0, "top_k": 50, "top_p": 0.85, "speed": 0.97},
-    "natural":   {"temperature": 0.78, "repetition_penalty": 2.4, "top_k": 55, "top_p": 0.88, "speed": 1.0},
-    "expresivo": {"temperature": 0.90, "repetition_penalty": 2.0, "top_k": 60, "top_p": 0.90, "speed": 1.0},
-    "energico":  {"temperature": 0.95, "repetition_penalty": 1.8, "top_k": 65, "top_p": 0.94, "speed": 1.05},
+    "calmado":   {"temperature": 0.55, "repetition_penalty": 3.5, "top_k": 45, "top_p": 0.82, "speed": 0.97},
+    "natural":   {"temperature": 0.68, "repetition_penalty": 2.8, "top_k": 50, "top_p": 0.85, "speed": 1.0},
+    "expresivo": {"temperature": 0.78, "repetition_penalty": 2.4, "top_k": 55, "top_p": 0.88, "speed": 1.0},
+    "energico":  {"temperature": 0.85, "repetition_penalty": 2.1, "top_k": 60, "top_p": 0.90, "speed": 1.05},
 }
 DEFAULT_STYLE = "expresivo"
 
@@ -291,12 +293,12 @@ def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path:
     Retries once with conservative params if XTTS throws (high-temperature
     runaway can raise 'index out of range in self')."""
     text = _ensure_spanish_marks(text, language)
+    # NOTE: we intentionally do NOT boost temperature/lower repetition_penalty
+    # for ?/! chunks anymore — that combo made XTTS hallucinate extra words
+    # after the intended text (more randomness = more runaway generation).
+    # The ¿/¡ opening mark above already drives most of the intonation gain
+    # without touching sampling params, so it doesn't add hallucination risk.
     p = dict(STYLE_PRESETS.get(style, STYLE_PRESETS[DEFAULT_STYLE]))
-    # Give questions and exclamations extra prosodic energy so the intonation
-    # actually lands (more temperature variation, less repetition damping).
-    if text.rstrip()[-1:] in "?!":
-        p["temperature"] = min(1.0, p["temperature"] + 0.08)
-        p["repetition_penalty"] = max(1.5, p["repetition_penalty"] - 0.3)
     for params in (p, _SAFE_PARAMS):
         try:
             tts.tts_to_file(
@@ -499,7 +501,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-30-intonation"
+BUILD_VERSION = "vq-2026-06-30-antihallucination"
 
 @app.get("/health")
 def health():
