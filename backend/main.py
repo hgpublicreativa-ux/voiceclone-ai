@@ -203,16 +203,35 @@ def _split_by_words(text: str, max_chars: int) -> list:
     return out
 
 
-def split_sentences(text: str, max_chars: int = 200) -> list:
+# Pause durations inserted between synthesized chunks (see _concat_wavs).
+# A period/question/exclamation gets a real breath pause; a comma gets a
+# shorter one; a hard word-limit split (not a natural pause point) gets
+# just enough to stop words from mashing together.
+SENTENCE_PAUSE = 0.32
+COMMA_PAUSE = 0.16
+HARD_SPLIT_PAUSE = 0.06
+
+# Only split a sentence on its internal commas if it's long enough that the
+# extra synthesis calls are worth it — fragmenting short sentences into tiny
+# chunks adds latency and raises XTTS hallucination risk without gaining
+# much, since a short sentence is already read at a natural pace in one go.
+COMMA_SPLIT_MIN_LEN = 70
+
+
+def split_into_chunks(text: str, max_chars: int = 200) -> list:
     """
-    Split text into sentence-level chunks for XTTS while PRESERVING the
-    punctuation that drives intonation (¿ ? ¡ ! …). Terminal marks are what
-    make XTTS raise the pitch for questions and add energy for exclamations,
-    so we never strip them.
-    - Split on sentence-ending punctuation, keeping the mark.
-    - Break an over-long sentence on commas, then on words if still too long,
-      so NO chunk ever exceeds max_chars (prevents 'index out of range').
-    - Re-attach the sentence's terminal mark (? ! …) to the last fragment.
+    Split text into synthesis chunks for XTTS, each paired with the pause
+    that should follow it. PRESERVES the punctuation that drives intonation
+    (¿ ? ¡ ! …) — terminal marks are what make XTTS raise pitch on questions
+    and add energy on exclamations, so we never strip them.
+
+    Returns a list of (chunk_text, pause_after_seconds) tuples.
+
+    - First split on sentence-ending punctuation (. ! ? …), keeping the mark.
+    - Long sentences are further split on commas so the comma actually gets
+      a pause instead of being read straight through.
+    - Any fragment still over max_chars is hard-split on words (prevents the
+      'index out of range' XTTS error on very long comma-less runs).
     """
     raw = re.split(r'(?<=[.!?…])\s+', text.strip())
     chunks = []
@@ -220,34 +239,40 @@ def split_sentences(text: str, max_chars: int = 200) -> list:
         sentence = sentence.strip()
         if not sentence:
             continue
-        if len(sentence) <= max_chars:
-            chunks.append(sentence)
-            continue
-        # Over-long: remember the terminal mark, split on commas, restore it.
         terminal = sentence[-1] if sentence[-1] in '.!?…' else ''
-        parts = re.split(r',\s*', sentence)
-        sub = []
-        current = ""
-        for part in parts:
-            candidate = (current + ", " + part).strip(", ") if current else part
-            if len(candidate) <= max_chars:
-                current = candidate
+
+        if len(sentence) <= max_chars and (
+            len(sentence) <= COMMA_SPLIT_MIN_LEN or ',' not in sentence
+        ):
+            chunks.append((sentence, SENTENCE_PAUSE))
+            continue
+
+        # Split into comma-clauses (also covers the over-max_chars case).
+        parts = [p.strip() for p in re.split(r',\s*', sentence) if p.strip()]
+        clause_items = []  # (text, pause_after)
+        n = len(parts)
+        for i, part in enumerate(parts):
+            is_last = i == n - 1
+            if len(part) > max_chars:
+                words = _split_by_words(part, max_chars)
+                for j, w in enumerate(words):
+                    w_is_last = is_last and j == len(words) - 1
+                    pause = SENTENCE_PAUSE if w_is_last else (
+                        COMMA_PAUSE if is_last else HARD_SPLIT_PAUSE
+                    )
+                    clause_items.append([w, pause])
             else:
-                if current:
-                    sub.append(current.strip(", "))
-                # The comma-part itself may still be too long → split by words.
-                if len(part) > max_chars:
-                    sub.extend(_split_by_words(part, max_chars))
-                    current = ""
-                else:
-                    current = part
-        if current:
-            sub.append(current.strip(", "))
-        # Keep the question/exclamation intonation on the final fragment.
-        if sub and terminal and sub[-1] and sub[-1][-1] not in '.!?…':
-            sub[-1] += terminal
-        chunks.extend(sub)
-    return [c for c in chunks if c]
+                # Keep the comma on non-terminal clauses so XTTS still hears
+                # it and produces the natural "continuing" intonation before
+                # we cut and insert our own timed pause.
+                text_piece = part if is_last else f"{part},"
+                pause = SENTENCE_PAUSE if is_last else COMMA_PAUSE
+                clause_items.append([text_piece, pause])
+        # Restore the sentence's terminal mark on the very last fragment.
+        if clause_items and terminal and clause_items[-1][0] and clause_items[-1][0][-1] not in '.!?…':
+            clause_items[-1][0] += terminal
+        chunks.extend((t, p) for t, p in clause_items if t)
+    return chunks
 
 
 # Expressiveness presets. Higher temperature + lower repetition_penalty =
@@ -355,12 +380,13 @@ def _trim_silence(src_path: str, dst_path: str):
         return False
 
 
-def _concat_wavs(part_paths: list, output_path: str, gap_dur: float = 0.15):
+def _concat_wavs(part_paths: list, gaps: list, output_path: str):
     """
-    Concatenate WAV files with a natural breathing pause between sentences.
-    Crossfade cuts speech — instead we trim silence per chunk, then add a
-    fixed silent gap (default 150ms) after every sentence except the last so
-    the speech doesn't run together (which is what makes it sound monotone).
+    Concatenate WAV files with a natural pause between chunks. Crossfade
+    would cut speech — instead we trim silence per chunk (via _trim_silence,
+    so no doubled-up pause) then add an explicit silent gap after each chunk.
+    `gaps` has one entry per part in part_paths; the gap after the LAST part
+    is ignored (nothing follows it).
     """
     if len(part_paths) == 1:
         shutil.copy(part_paths[0], output_path)
@@ -368,13 +394,13 @@ def _concat_wavs(part_paths: list, output_path: str, gap_dur: float = 0.15):
     args = ["ffmpeg", "-y", "-loglevel", "error"]
     for p in part_paths:
         args += ["-i", p]
-    # Normalize each chunk; pad every chunk but the last with a silent gap
-    # so the gap is actually baked into the concatenated stream.
+    # Normalize each chunk; pad every chunk but the last with its own gap
+    # duration so pauses reflect whether they followed a comma or a period.
     norm_parts = []
     for i in range(len(part_paths)):
         chain = f"[{i}:a]aresample=24000,aformat=sample_fmts=s16:channel_layouts=mono"
         if i < len(part_paths) - 1:
-            chain += f",apad=pad_dur={gap_dur}"
+            chain += f",apad=pad_dur={gaps[i]}"
         chain += f"[n{i}]"
         norm_parts.append(chain)
     norm = ";".join(norm_parts)
@@ -439,38 +465,42 @@ def _adjust_tempo_to_natural(text: str, audio_path: str, output_path: str) -> bo
 
 def synthesize(text: str, speaker_wav: str, language: str, output_path: str, style: str = DEFAULT_STYLE):
     """
-    Split text into sentences, generate each with XTTS, concat with natural
-    pauses, then keep the overall reading speed within a natural band.
+    Split text into chunks at sentence AND comma boundaries, generate each
+    with XTTS, concat with a pause sized to the punctuation that produced the
+    split (comma = short pause, period/!/? = longer pause), then keep the
+    overall reading speed within a natural band.
     `style` selects an expressiveness preset (see STYLE_PRESETS).
     """
     tts = get_tts()
     language = normalize_language(language)
     text = normalize_text(text)
-    sentences = split_sentences(text)
+    items = split_into_chunks(text)  # list of (chunk_text, pause_after_seconds)
 
-    if len(sentences) == 1:
+    if len(items) == 1:
+        chunk_text, _ = items[0]
         raw = str(Path(output_path).parent / f"raw_{uuid.uuid4().hex[:6]}.wav")
-        _synthesize_chunk(tts, sentences[0], speaker_wav, language, raw, style)
+        _synthesize_chunk(tts, chunk_text, speaker_wav, language, raw, style)
         # Keep tempo natural; fall back to the raw chunk before cleaning it up.
-        if not _adjust_tempo_to_natural(sentences[0], raw, output_path):
+        if not _adjust_tempo_to_natural(chunk_text, raw, output_path):
             shutil.copy(raw, output_path)
         Path(raw).unlink(missing_ok=True)
         return
 
     tmp_dir = Path(output_path).parent / f"synth_tmp_{uuid.uuid4().hex[:6]}"
     tmp_dir.mkdir(exist_ok=True)
-    part_paths = []
+    part_paths, gaps = [], []
     try:
-        for i, sentence in enumerate(sentences):
+        for i, (chunk_text, pause_after) in enumerate(items):
             raw = str(tmp_dir / f"raw_{i:03d}.wav")
             trimmed = str(tmp_dir / f"part_{i:03d}.wav")
-            _synthesize_chunk(tts, sentence, speaker_wav, language, raw, style)
+            _synthesize_chunk(tts, chunk_text, speaker_wav, language, raw, style)
             # Trim XTTS silence padding; fall back to raw if trim fails
             if not _trim_silence(raw, trimmed):
                 trimmed = raw
             part_paths.append(trimmed)
+            gaps.append(pause_after)
         concat_tmp = str(tmp_dir / "concat.wav")
-        _concat_wavs(part_paths, concat_tmp)
+        _concat_wavs(part_paths, gaps, concat_tmp)
         # Keep the final reading speed natural (gentle, only if out of band).
         if not _adjust_tempo_to_natural(text, concat_tmp, output_path):
             shutil.copy(concat_tmp, output_path)
@@ -508,7 +538,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-30-gptcond30"
+BUILD_VERSION = "vq-2026-06-30-commapauses"
 
 @app.get("/health")
 def health():
