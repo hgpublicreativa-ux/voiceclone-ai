@@ -147,9 +147,40 @@ def merge_reference_audios(audio_paths: list, dst_path: str) -> bool:
 
 import re
 
+def sanitize_for_tts(text: str) -> str:
+    """
+    Reduce punctuation to the small set XTTS actually intones well: . , ! ? ¿ ¡
+    Anything outside that set the model tends to READ ALOUD as a word
+    ("punto punto punto", "asterisco", "guión"...) instead of pausing.
+    - ellipsis / repeated dots → single period
+    - ; : — – and spaced hyphens → comma (same pause role)
+    - quotes, brackets, markdown symbols → removed
+    - repeated terminal marks (!!! ?? ?!) → single mark
+    """
+    t = text
+    t = t.replace('…', '.')
+    t = re.sub(r'\.{2,}', '.', t)
+    # Semicolon, colon and dashes act as a comma-length pause.
+    t = re.sub(r'\s*[;:—–]\s*', ', ', t)
+    # Hyphen used as a pause (spaced); keep in-word hyphens (bien-estar).
+    t = re.sub(r'\s+-\s+', ', ', t)
+    # Symbols XTTS speaks literally — drop them (keep apostrophes for
+    # contractions like "don't").
+    t = re.sub(r'[«»“”"`´\(\)\[\]\{\}\*_#~\^<>|\\/=+]', ' ', t)
+    # Collapse repeated/mixed terminal marks: "!!!" → "!", "?!" → "?".
+    t = re.sub(r'([!?])[!?]+', r'\1', t)
+    # Clean up stray punctuation left by the removals.
+    t = re.sub(r'\s*,(\s*,)+', ',', t)
+    t = re.sub(r',\s*([.!?])', r'\1', t)
+    t = re.sub(r'([.!?])\s*,', r'\1 ', t)
+    t = re.sub(r'\s+([.,!?])', r'\1', t)
+    t = re.sub(r'\s+', ' ', t)
+    return t.strip()
+
+
 def normalize_text(text: str) -> str:
-    text = re.sub(r'\s+', ' ', text).strip()
-    if text and text[-1] not in '.!?,;:…':
+    text = sanitize_for_tts(text)
+    if text and text[-1] not in '.!?,;:':
         text += '.'
     return text
 
@@ -260,19 +291,28 @@ def split_into_chunks(text: str, max_chars: int = 200) -> list:
                     pause = SENTENCE_PAUSE if w_is_last else (
                         COMMA_PAUSE if is_last else HARD_SPLIT_PAUSE
                     )
+                    # Every chunk must end in a terminal mark: without a stop
+                    # signal the XTTS decoder keeps generating past the text
+                    # (hallucinated words). The last fragment gets the real
+                    # terminal restored below.
+                    if not w_is_last:
+                        w += '.'
                     clause_items.append([w, pause])
             else:
-                # Keep the comma on non-terminal clauses so XTTS still hears
-                # it and produces the natural "continuing" intonation before
-                # we cut and insert our own timed pause.
-                text_piece = part if is_last else f"{part},"
+                # End non-terminal clauses with a PERIOD, not a comma — a
+                # trailing comma leaves the utterance "open" and XTTS keeps
+                # generating (invented words after the pause). The comma's
+                # pause is still honored as the timed gap in _concat_wavs.
+                text_piece = part if is_last else f"{part}."
                 pause = SENTENCE_PAUSE if is_last else COMMA_PAUSE
                 clause_items.append([text_piece, pause])
         # Restore the sentence's terminal mark on the very last fragment.
         if clause_items and terminal and clause_items[-1][0] and clause_items[-1][0][-1] not in '.!?…':
             clause_items[-1][0] += terminal
         chunks.extend((t, p) for t, p in clause_items if t)
-    return chunks
+    # Never send a punctuation-only chunk to XTTS — with no real words the
+    # model "reads" the marks aloud or hallucinates from silence.
+    return [(t, p) for t, p in chunks if re.search(r'\w', t)]
 
 
 # Expressiveness presets. Higher temperature + lower repetition_penalty =
@@ -285,8 +325,13 @@ STYLE_PRESETS = {
     "natural":   {"temperature": 0.68, "repetition_penalty": 2.8, "top_k": 50, "top_p": 0.85, "speed": 1.0},
     "expresivo": {"temperature": 0.78, "repetition_penalty": 2.4, "top_k": 55, "top_p": 0.88, "speed": 1.0},
     "energico":  {"temperature": 0.85, "repetition_penalty": 2.1, "top_k": 60, "top_p": 0.90, "speed": 1.05},
+    # Entertainment-reporter delivery: max SAFE sampling energy (still at the
+    # 0.85 / 2.0 hallucination cap) + faster pace. Most of the "excited" feel
+    # comes from the text transform in _synthesize_chunk (declaratives are
+    # read as exclamations), which adds energy WITHOUT touching sampling.
+    "reportera": {"temperature": 0.85, "repetition_penalty": 2.1, "top_k": 60, "top_p": 0.90, "speed": 1.07},
 }
-DEFAULT_STYLE = "expresivo"
+DEFAULT_STYLE = "reportera"
 
 # Conservative fallback params used when a chunk fails to generate (e.g. XTTS
 # 'index out of range in self' from runaway generation at high temperature).
@@ -317,6 +362,12 @@ def _synthesize_chunk(tts, text: str, speaker_wav: str, language: str, out_path:
     """Generate a single short chunk — no internal splitting.
     Retries once with conservative params if XTTS throws (high-temperature
     runaway can raise 'index out of range in self')."""
+    if style == "reportera" and text.endswith('.'):
+        # Showbiz-reporter energy: read declaratives with exclamation prosody.
+        # This is a TEXT-level intonation boost (like the ¡/¿ marks) — it adds
+        # excitement without raising sampling randomness, so no extra
+        # hallucination risk. Questions keep their '?' untouched.
+        text = text[:-1] + '!'
     text = _ensure_spanish_marks(text, language)
     # NOTE: we intentionally do NOT boost temperature/lower repetition_penalty
     # for ?/! chunks anymore — that combo made XTTS hallucinate extra words
@@ -410,7 +461,7 @@ def _concat_wavs(part_paths: list, gaps: list, output_path: str):
     subprocess.run(args, check=True, capture_output=True, timeout=120)
 
 
-def _adjust_tempo_to_natural(text: str, audio_path: str, output_path: str) -> bool:
+def _adjust_tempo_to_natural(text: str, audio_path: str, output_path: str, natural_high: float = 3.3) -> bool:
     """
     Keep the reading speed in a natural band instead of forcing an exact rate.
     Forcing every clip to a fixed words-per-second with atempo time-stretches
@@ -424,7 +475,7 @@ def _adjust_tempo_to_natural(text: str, audio_path: str, output_path: str) -> bo
         shutil.copy(audio_path, output_path)
         return True
 
-    NATURAL_LOW, NATURAL_HIGH = 2.3, 3.3  # words per second
+    NATURAL_LOW, NATURAL_HIGH = 2.3, natural_high  # words per second
     TEMPO_MIN, TEMPO_MAX = 0.9, 1.12      # ±~12% — stays transparent
 
     try:
@@ -475,13 +526,16 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str, sty
     language = normalize_language(language)
     text = normalize_text(text)
     items = split_into_chunks(text)  # list of (chunk_text, pause_after_seconds)
+    # Reporters speak faster — let the reportera style keep its pace instead
+    # of getting slowed back down by the natural-band correction.
+    natural_high = 3.7 if style == "reportera" else 3.3
 
     if len(items) == 1:
         chunk_text, _ = items[0]
         raw = str(Path(output_path).parent / f"raw_{uuid.uuid4().hex[:6]}.wav")
         _synthesize_chunk(tts, chunk_text, speaker_wav, language, raw, style)
         # Keep tempo natural; fall back to the raw chunk before cleaning it up.
-        if not _adjust_tempo_to_natural(chunk_text, raw, output_path):
+        if not _adjust_tempo_to_natural(chunk_text, raw, output_path, natural_high):
             shutil.copy(raw, output_path)
         Path(raw).unlink(missing_ok=True)
         return
@@ -502,7 +556,7 @@ def synthesize(text: str, speaker_wav: str, language: str, output_path: str, sty
         concat_tmp = str(tmp_dir / "concat.wav")
         _concat_wavs(part_paths, gaps, concat_tmp)
         # Keep the final reading speed natural (gentle, only if out of band).
-        if not _adjust_tempo_to_natural(text, concat_tmp, output_path):
+        if not _adjust_tempo_to_natural(text, concat_tmp, output_path, natural_high):
             shutil.copy(concat_tmp, output_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -538,7 +592,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-06-30-commapauses"
+BUILD_VERSION = "vq-2026-07-01-reportera"
 
 @app.get("/health")
 def health():
@@ -647,7 +701,7 @@ class SpeakRequest(BaseModel):
     text: str
     voice_id: Optional[str] = None
     language: str = "es-co"
-    style: str = DEFAULT_STYLE  # calmado | natural | expresivo | energico
+    style: str = DEFAULT_STYLE  # calmado | natural | expresivo | energico | reportera
 
 @app.post("/speak")
 def speak(
