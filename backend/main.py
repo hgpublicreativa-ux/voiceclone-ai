@@ -15,6 +15,10 @@ def _patched_torch_load(*args, **kwargs):
     return _orig_torch_load(*args, **kwargs)
 torch.load = _patched_torch_load
 
+# Inference-only server: never build autograd graphs. Cuts peak RAM during
+# synthesis substantially (no activation buffers kept for backward).
+torch.set_grad_enabled(False)
+
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Header, Depends
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,19 +58,47 @@ if STATIC_DIR.exists():
 
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "admin-change-me")
 
-# ── TTS singleton ─────────────────────────────────────────────────────────────
+# ── TTS singleton with idle auto-unload ──────────────────────────────────────
+# The XTTS model holds ~4-5 GB of RAM. Railway bills memory per GB-minute of
+# ACTUAL usage, so keeping the model resident 24/7 for a few syntheses per day
+# is what drives the bill. Instead we load it on demand and evict it after
+# TTS_IDLE_UNLOAD_SECONDS without use — RAM falls back to the ~300 MB FastAPI
+# baseline for the rest of the day. Trade-off: the first request after an idle
+# period pays the model load again (~1-2 min on CPU).
+import gc
+import threading
+import time
+
 _tts_instance = None
+_tts_lock = threading.RLock()
+_tts_busy = 0          # syntheses in flight; the unloader never evicts while > 0
+_tts_last_used = 0.0
+TTS_IDLE_UNLOAD_SECONDS = int(os.environ.get("TTS_IDLE_UNLOAD_SECONDS", "600"))
+
+def _tts_idle_unloader():
+    global _tts_instance
+    while True:
+        time.sleep(30)
+        with _tts_lock:
+            if (
+                _tts_instance is not None
+                and _tts_busy == 0
+                and time.time() - _tts_last_used > TTS_IDLE_UNLOAD_SECONDS
+            ):
+                _tts_instance = None
+                gc.collect()
+
+threading.Thread(target=_tts_idle_unloader, daemon=True).start()
 
 def get_tts():
-    global _tts_instance
-    if _tts_instance is None:
-        import gc
-        from TTS.api import TTS
-        gc.collect()  # Free any leftover memory before loading
-        _tts_instance = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cpu")
-        # Disable gradient computation — we're only doing inference
-        _tts_instance.model.eval()
-    return _tts_instance
+    global _tts_instance, _tts_last_used
+    with _tts_lock:
+        _tts_last_used = time.time()
+        if _tts_instance is None:
+            gc.collect()  # free leftovers before the big allocation
+            from TTS.api import TTS
+            _tts_instance = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cpu")
+        return _tts_instance
 
 
 def preprocess_reference(src_path: str, dst_path: str) -> bool:
@@ -527,6 +559,21 @@ def _adjust_tempo_to_natural(text: str, audio_path: str, output_path: str, natur
 
 
 def synthesize(text: str, speaker_wav: str, language: str, output_path: str, style: str = DEFAULT_STYLE):
+    """Public entry point: runs _do_synthesize while holding the busy counter
+    so the idle unloader can't evict the model mid-synthesis (a long locución
+    can outlast the idle timeout)."""
+    global _tts_busy, _tts_last_used
+    with _tts_lock:
+        _tts_busy += 1
+    try:
+        _do_synthesize(text, speaker_wav, language, output_path, style)
+    finally:
+        with _tts_lock:
+            _tts_busy -= 1
+            _tts_last_used = time.time()
+
+
+def _do_synthesize(text: str, speaker_wav: str, language: str, output_path: str, style: str = DEFAULT_STYLE):
     """
     Split text into chunks at sentence AND comma boundaries, generate each
     with XTTS, concat with a pause sized to the punctuation that produced the
@@ -604,7 +651,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-07-01-reportera"
+BUILD_VERSION = "vq-2026-07-06-lowmem"
 
 @app.get("/health")
 def health():
