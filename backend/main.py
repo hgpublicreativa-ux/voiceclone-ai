@@ -41,6 +41,14 @@ VOICES_META_FILE = VOICES_DIR / "voices_meta.json"
 VOICES_DIR.mkdir(exist_ok=True)
 OUTPUTS_DIR.mkdir(exist_ok=True)
 
+def cleanup_old_outputs(max_age_hours: int = 24):
+    """Remove output files older than max_age_hours to save disk space."""
+    import time
+    now = time.time()
+    for f in OUTPUTS_DIR.glob("*.wav"):
+        if now - f.stat().st_mtime > max_age_hours * 3600:
+            f.unlink(missing_ok=True)
+
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -52,8 +60,12 @@ _tts_instance = None
 def get_tts():
     global _tts_instance
     if _tts_instance is None:
+        import gc
         from TTS.api import TTS
+        gc.collect()  # Free any leftover memory before loading
         _tts_instance = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cpu")
+        # Disable gradient computation — we're only doing inference
+        _tts_instance.model.eval()
     return _tts_instance
 
 
@@ -596,6 +608,7 @@ BUILD_VERSION = "vq-2026-07-01-reportera"
 
 @app.get("/health")
 def health():
+    cleanup_old_outputs(max_age_hours=24)  # Clean 24h+ old files
     return {"status": "ok", "build": BUILD_VERSION}
 
 @app.get("/")
