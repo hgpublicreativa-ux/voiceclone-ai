@@ -19,6 +19,12 @@ torch.load = _patched_torch_load
 # synthesis substantially (no activation buffers kept for backward).
 torch.set_grad_enabled(False)
 
+# Cap torch threads to the Railway vCPU limit. Inside a container torch sees
+# the HOST machine's cores and spawns that many threads; the cgroup then
+# throttles them and synthesis crawls (observed real-time factor ~54 vs the
+# ~3-5 expected on 8 vCPU).
+torch.set_num_threads(int(os.environ.get("TORCH_NUM_THREADS", "8")))
+
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Header, Depends
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -74,6 +80,33 @@ _tts_lock = threading.RLock()
 _tts_busy = 0          # syntheses in flight; the unloader never evicts while > 0
 _tts_last_used = 0.0
 TTS_IDLE_UNLOAD_SECONDS = int(os.environ.get("TTS_IDLE_UNLOAD_SECONDS", "600"))
+
+# One synthesis at a time. Parallel XTTS runs on a shared CPU just thrash each
+# other (client retries after a timeout pile zombie syntheses onto the
+# threadpool and every chunk slows to a crawl); serializing keeps each chunk
+# fast and bounds peak RAM.
+_synth_gate = threading.Semaphore(1)
+
+def _busy_keepalive():
+    """While a synthesis is in flight, ping our own public URL so Railway's
+    serverless idle detector sees traffic. A long chunk can be silent for
+    minutes (no bytes moving on the open request) and Railway would otherwise
+    stop the container mid-job — observed as 502 'Application failed to
+    respond' on the caller's side."""
+    import urllib.request
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    if not domain:
+        return
+    url = f"https://{domain}/health"
+    while True:
+        time.sleep(45)
+        if _tts_busy > 0:
+            try:
+                urllib.request.urlopen(url, timeout=10)
+            except Exception:
+                pass
+
+threading.Thread(target=_busy_keepalive, daemon=True).start()
 
 def _tts_idle_unloader():
     global _tts_instance
@@ -560,13 +593,15 @@ def _adjust_tempo_to_natural(text: str, audio_path: str, output_path: str, natur
 
 def synthesize(text: str, speaker_wav: str, language: str, output_path: str, style: str = DEFAULT_STYLE):
     """Public entry point: runs _do_synthesize while holding the busy counter
-    so the idle unloader can't evict the model mid-synthesis (a long locución
-    can outlast the idle timeout)."""
+    (so the idle unloader can't evict the model mid-synthesis and the busy
+    keepalive knows to ping) and the synth gate (so only one synthesis runs
+    at a time — queued requests wait their turn instead of thrashing)."""
     global _tts_busy, _tts_last_used
     with _tts_lock:
         _tts_busy += 1
     try:
-        _do_synthesize(text, speaker_wav, language, output_path, style)
+        with _synth_gate:
+            _do_synthesize(text, speaker_wav, language, output_path, style)
     finally:
         with _tts_lock:
             _tts_busy -= 1
@@ -651,7 +686,7 @@ def require_api_key(x_api_key: str = Header(...)):
 # ── Health ────────────────────────────────────────────────────────────────────
 # Bump BUILD_VERSION on every deploy so we can confirm from outside that the
 # new container has actually rolled out (Railway rebuilds take several minutes).
-BUILD_VERSION = "vq-2026-07-06-lowmem"
+BUILD_VERSION = "vq-2026-07-06-lowmem2"
 
 @app.get("/health")
 def health():
